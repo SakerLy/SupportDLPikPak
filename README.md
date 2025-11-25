@@ -21,8 +21,8 @@ Phần mềm hỗ trợ chạy đa nền tảng và có thể build thành file 
 
 ## 🛠 Cài đặt & chạy bằng Python
 
-### 1. Cài Python 3.10+  
-Tải tại: https://www.python.org/downloads/
+### 1. Cài Python 3.11
+Tải tại: [https://www.python.org/downloads/](https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe)
 
 ### 2. Cài thư viện cần thiết
 
