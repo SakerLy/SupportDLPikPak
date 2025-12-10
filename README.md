@@ -18,7 +18,7 @@ The tool is cross-platform and can be built as a `.exe` file for Windows.
 - Tự động đăng nhập và tự refresh token  
 - Không cần đăng nhập nếu chỉ dùng Share URL  
 - Hỗ trợ tải hàng loạt  
-- Hoạt động trên Windows, Android (Termux), Linux  
+- Hoạt động trên Windows, Android (Termux)
 - Không cần cài ứng dụng PikPak
 
 ### EN
@@ -27,7 +27,7 @@ The tool is cross-platform and can be built as a `.exe` file for Windows.
 - Auto login and token refreshing  
 - Works without login when only using Share URLs  
 - Supports bulk downloads  
-- Works on Windows, Android (Termux), Linux  
+- Works on Windows, Android (Termux)
 - No PikPak App required
 
 ---
