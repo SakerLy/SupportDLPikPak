@@ -5,9 +5,6 @@
 PikPakDownloader là công cụ hỗ trợ tải file và thư mục từ dịch vụ PikPak một cách nhanh chóng và tự động.  
 PikPakDownloader is a tool that helps you download files and folders from PikPak quickly and automatically.
 
-Công cụ chạy đa nền tảng và có thể build thành file `.exe` cho Windows.  
-The tool is cross-platform and can be built as a `.exe` file for Windows.
-
 ---
 
 ## Tính năng chính — Main Features
