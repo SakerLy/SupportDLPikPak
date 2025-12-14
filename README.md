@@ -1,12 +1,3 @@
-# PikPakDownloader
-## 🇻🇳 Công cụ tải PikPak nhanh – tiện – đa nền tảng  
-## 🇺🇸 Fast & Convenient PikPak Download Tool
-
-PikPakDownloader là công cụ hỗ trợ tải file và thư mục từ dịch vụ PikPak một cách nhanh chóng và tự động.  
-PikPakDownloader is a tool that helps you download files and folders from PikPak quickly and automatically.
-
----
-
 ## Tính năng chính — Main Features
 
 ### VN
@@ -15,7 +6,7 @@ PikPakDownloader is a tool that helps you download files and folders from PikPak
 - Tự động đăng nhập và tự refresh token  
 - Không cần đăng nhập nếu chỉ dùng Share URL  
 - Hỗ trợ tải hàng loạt  
-- Hoạt động trên Windows, Android (Termux)
+- Hoạt động trên Windows
 - Không cần cài ứng dụng PikPak
 
 ### EN
@@ -24,7 +15,7 @@ PikPakDownloader is a tool that helps you download files and folders from PikPak
 - Auto login and token refreshing  
 - Works without login when only using Share URLs  
 - Supports bulk downloads  
-- Works on Windows, Android (Termux)
+- Works on Windows
 - No PikPak App required
 
 ---
