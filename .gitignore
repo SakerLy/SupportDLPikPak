@@ -1,6 +1,7 @@
 .cache
 config.json
 __pycache__/
+downloads
 *.pyc
 *.pyo
 *.pyd
