@@ -9,7 +9,7 @@ from rich.console import Console
 # Tắt cảnh báo bảo mật SSL gây rác màn hình
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-APP_VERSION = "0.0.1"
+APP_VERSION = "0.0.2"
 APP_AUTHOR = "SakerLy"
 GITHUB_REPO_URL = "https://raw.githubusercontent.com/SakerLy/PikPakDownloader/main/pikpak_downloader.py"
 GITHUB_RELEASE_URL = "https://github.com/SakerLy/PikPakDownloader/releases"
