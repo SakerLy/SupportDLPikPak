@@ -15,7 +15,6 @@ from core.utils import UpdateManager, CacheManager
 from core.api import PikPakLogin
 from core.downloader import Downloader
 
-# ASCII ART LOGO
 ASCII_LOGO = """
 [bold cyan]
 ██████╗ ██╗██╗  ██╗██████╗  █████╗ ██╗  ██╗
@@ -36,7 +35,6 @@ class Menu:
 
     def print_header(self):
         self.clear()
-        # Hiển thị ASCII Art căn giữa
         console.print(Align.center(ASCII_LOGO))
         console.print(Align.center(f"[bold white]Version {APP_VERSION}[/] | [dim]{Language.get('menu_dev')}[/]\n"))
 
@@ -46,7 +44,6 @@ class Menu:
             Config.load_config()
             self.print_header()
             
-            # Tạo bảng menu không viền
             table = Table(show_header=False, box=None, padding=(0, 2), expand=True)
             table.add_column("Key", justify="right", style="bold cyan", width=10)
             table.add_column("Action", style="bold white")
@@ -223,7 +220,7 @@ class Menu:
         grid.add_row("Premium Mode:", "ON" if Config.FORCE_PREMIUM_MODE else "Off")
         grid.add_row("Threads/File:", str(Config.CONCURRENT_THREADS))
         
-        console.print(Panel(grid, title=Language.get("menu_5"), border_style="blue", box=box.ROUNDED)) # Config dùng box rounded cho dễ nhìn
+        console.print(Panel(grid, title=Language.get("menu_5"), border_style="blue", box=box.ROUNDED))
         Prompt.ask("\n  [dim]Enter...[/]")
 
     def download_menu(self):
@@ -283,7 +280,6 @@ class Menu:
         self.downloader.progress_data = {}
         self.downloader.start_monitor(len(files), total_size_bytes)
         
-        # Sửa lỗi: Import Live và dùng đúng cách
         with Live(self.downloader.generate_dashboard_table(), refresh_per_second=4, screen=True) as live:
             self.downloader.monitor_active = True
             
