@@ -11,7 +11,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 APP_VERSION = "0.0.2"
 APP_AUTHOR = "SakerLy"
-GITHUB_REPO_URL = "https://raw.githubusercontent.com/SakerLy/SupportDLPikPak/refs/heads/main/config/settings.py"
+GITHUB_ZIP_URL = "https://github.com/SakerLy/SupportDLPikPak/archive/refs/heads/main.zip"
+GITHUB_VERSION_URL = "https://raw.githubusercontent.com/SakerLy/SupportDLPikPak/refs/heads/main/config/settings.py"
 GITHUB_RELEASE_URL = "https://github.com/SakerLy/SupportDLPikPak/releases"
 
 # Xác định đường dẫn gốc

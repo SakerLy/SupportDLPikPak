@@ -3,12 +3,16 @@ import json
 import hashlib
 import time
 import sys
+import os
 import webbrowser
+import zipfile
+import shutil
+from pathlib import Path
 from datetime import datetime, timedelta
 from rich.panel import Panel
 from rich.prompt import Confirm
 
-from config.settings import Config, console, Language, APP_VERSION, GITHUB_REPO_URL, GITHUB_RELEASE_URL, IS_FROZEN, BASE_DIR
+from config.settings import Config, console, Language, APP_VERSION, GITHUB_ZIP_URL, GITHUB_VERSION_URL, GITHUB_RELEASE_URL, IS_FROZEN, BASE_DIR
 
 class CacheManager:
     if IS_FROZEN: CACHE_DIR = BASE_DIR / ".cache"
@@ -65,11 +69,11 @@ class HttpClient:
         except Exception as e: return 0, None, str(e)
 
 class UpdateManager:
-    API_URL = "https://api.github.com/repos/SakerLy/PikPakDownloader/releases/latest"
+    API_URL = "https://api.github.com/repos/SakerLy/SupportDLPikPak/releases/latest"
     
     @staticmethod
     def check_for_updates():
-        if "raw.githubusercontent.com" not in GITHUB_REPO_URL: return 
+        if "raw.githubusercontent.com" not in GITHUB_VERSION_URL: return 
         
         found_update = False
         latest_tag = ""
@@ -107,16 +111,49 @@ class UpdateManager:
             return r > l
         except: return False
     @staticmethod
-    def perform_source_update():
+    def perform_full_zip_update():
+        """Tải toàn bộ source code ZIP, giải nén và ghi đè"""
+        temp_zip = BASE_DIR / "update_temp.zip"
+        extract_path = BASE_DIR / "update_temp_folder"
+        
         try:
-            with console.status("[bold green]Downloading update...", spinner="arrow3"):
-                response = requests.get(GITHUB_REPO_URL, timeout=10)
-                if response.status_code == 200:
-                    if "APP_VERSION" in response.text and "def main():" in response.text:
-                        with open(sys.argv[0], 'w', encoding='utf-8') as f: f.write(response.text)
-                        console.print(f"[bold green]{Language.get('update_done')}[/]"); time.sleep(2)
-                        import os
-                        os.execv(sys.executable, ['python'] + sys.argv)
-                    else: console.print(f"[bold red]✖ {Language.get('update_fail')} (Corrupted)[/]")
-                else: console.print(f"[bold red]✖ {Language.get('update_fail')} (Net)[/]")
-        except Exception as e: console.print(f"[bold red]✖ {e}[/]")
+            with console.status("[bold green]Downloading full update package...", spinner="arrow3"):
+                # 1. Tải ZIP
+                r = requests.get(GITHUB_ZIP_URL, stream=True, timeout=30)
+                if r.status_code != 200: raise Exception("Download failed")
+                with open(temp_zip, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+
+            with console.status("[bold blue]Extracting and applying files...", spinner="dots"):
+                # 2. Giải nén
+                with zipfile.ZipFile(temp_zip, 'r') as zip_ref:
+                    zip_ref.extractall(extract_path)
+                
+                subfolders = [f for f in extract_path.iterdir() if f.is_dir()]
+                if not subfolders: raise Exception("Invalid ZIP structure")
+                source_folder = subfolders[0]
+
+                # 3. Ghi đè từng thành phần
+                for item in source_folder.iterdir():
+                    dest_item = BASE_DIR / item.name
+                    if item.is_dir():
+                        if dest_item.exists(): shutil.rmtree(dest_item)
+                        shutil.copytree(item, dest_item)
+                    else:
+                        shutil.copy2(item, dest_item)
+
+            console.print(f"[bold green]{Language.get('update_done')}[/]")
+            
+            # 4. Dọn dẹp
+            if temp_zip.exists(): temp_zip.unlink()
+            if extract_path.exists(): shutil.rmtree(extract_path)
+            
+            time.sleep(2)
+            # Khởi động lại
+            os.execv(sys.executable, ['python'] + sys.argv)
+
+        except Exception as e:
+            console.print(f"[bold red]✖ Update failed: {e}[/]")
+            if temp_zip.exists(): temp_zip.unlink()
+            if extract_path.exists(): shutil.rmtree(extract_path)
