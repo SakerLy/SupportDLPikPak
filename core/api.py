@@ -2,7 +2,8 @@ import hashlib
 import time
 import uuid
 import json
-from config.settings import Config, console, Language, VIP_USERNAME, VIP_PASSWORD
+import requests
+from config.settings import Config, console, Language
 from core.utils import HttpClient, CacheManager
 
 class PikPakLogin:
@@ -26,8 +27,6 @@ class PikPakLogin:
         form_data = {"client_id": self.CLIENT_ID, "client_secret": self.CLIENT_SECRET, "username": self.username, "password": self.password, "captcha_token": captcha_token}
         headers = {"Content-Type": "application/x-www-form-urlencoded", "User-Agent": self._build_user_agent(), "X-Device-Id": self.device_id, "X-Captcha-Token": captcha_token}
         
-        # Dùng requests trực tiếp vì HttpClient.request trả về tuple, cần xử lý lại để gọn
-        import requests
         try:
             resp = requests.post(f"{self.USER_API}/v1/auth/signin", data=form_data, headers=headers, timeout=20, verify=False, proxies=Config.get_proxy_dict())
             data = resp.json()
@@ -42,7 +41,6 @@ class PikPakAPI:
     def __init__(self):
         self.access_token = None
         self.headers = {}
-        self.vip_headers = {}
 
     def refresh_token(self):
         Config.load_config()
@@ -54,7 +52,6 @@ class PikPakAPI:
         headers = {"User-Agent": ua, "X-Device-Id": Config.DEVICE_ID, "Content-Type": "application/x-www-form-urlencoded"}
         form = {"client_id": PikPakLogin.CLIENT_ID, "client_secret": PikPakLogin.CLIENT_SECRET, "grant_type": "refresh_token", "refresh_token": Config.REFRESH_TOKEN}
         
-        import requests
         try:
             resp = requests.post(f"{self.AUTH_URL}/v1/auth/token", data=form, headers=headers, timeout=15, verify=False, proxies=Config.get_proxy_dict())
             data = resp.json()
@@ -63,24 +60,6 @@ class PikPakAPI:
             self.headers = {"Authorization": f"Bearer {self.access_token}", "x-device-id": Config.DEVICE_ID}
             return True
         except: return False
-
-    def auth_vip(self):
-        if not VIP_USERNAME or not VIP_PASSWORD: return False
-        if self.vip_headers: return True
-        vip_device_id = hashlib.md5(VIP_USERNAME.encode()).hexdigest()
-        try:
-            login_instance = PikPakLogin(VIP_USERNAME, VIP_PASSWORD, vip_device_id)
-            result = login_instance.login()
-            if result and "access_token" in result:
-                self.vip_headers = {"Authorization": f"Bearer {result['access_token']}", "x-device-id": vip_device_id}
-                console.print("[bold green]VIP Login Success![/]")
-                return True
-            else:
-                console.print("[bold red]VIP Login Failed![/]")
-                return False
-        except Exception as e: 
-            console.print(f"[bold red]VIP Auth Error: {e}[/]")
-            return False
 
     def get_share_info(self, share_id, password):
         if Config.USE_CACHE:
@@ -127,8 +106,7 @@ class PikPakAPI:
             if m.get("link", {}).get("url"): return m["link"]["url"]
         return None
 
-    def restore_and_poll(self, share_id, file_id, pass_token, use_vip=False):
-        req_headers = self.vip_headers if use_vip else self.headers
+    def restore_and_poll(self, share_id, file_id, pass_token):
         payload = {
             "share_id": share_id,
             "pass_code_token": pass_token,
@@ -136,7 +114,7 @@ class PikPakAPI:
             "to_parent_id": "",    
             "params": {"trace_file_ids": file_id} 
         }
-        code, data, raw_text = HttpClient.request("POST", f"{self.BASE_URL}/drive/v1/share/restore", headers=req_headers, json_data=payload)
+        code, data, raw_text = HttpClient.request("POST", f"{self.BASE_URL}/drive/v1/share/restore", headers=self.headers, json_data=payload)
         
         if code != 200 or not data or "restore_task_id" not in data:
             return None
@@ -145,7 +123,7 @@ class PikPakAPI:
         max_retries = 30
         for _ in range(max_retries):
             time.sleep(1.5)
-            code, tdata, _ = HttpClient.request("GET", f"{self.BASE_URL}/drive/v1/tasks/{task_id}", headers=req_headers)
+            code, tdata, _ = HttpClient.request("GET", f"{self.BASE_URL}/drive/v1/tasks/{task_id}", headers=self.headers)
             if code == 200 and tdata:
                 phase = tdata.get("phase")
                 if phase == "PHASE_TYPE_COMPLETE":
@@ -160,31 +138,39 @@ class PikPakAPI:
                 elif phase == "PHASE_TYPE_ERROR": return None
         return None
 
-    def wait_for_file(self, filename, max_retries=20, use_vip=False):
-        req_headers = self.vip_headers if use_vip else self.headers
+    def wait_for_file(self, filename, max_retries=20):
         for _ in range(max_retries):
             time.sleep(2.0) 
-            params = {"thumbnail_size": "SIZE_MEDIUM", "limit": 10, "with_audit": "true", "filters": f'{{"name":{{"eq":"{filename}"}},"trashed":{{"eq":false}}}}', "order_by": "modified_time", "sort": "desc"}
-            code, data, _ = HttpClient.request("GET", f"{self.BASE_URL}/drive/v1/files", headers=req_headers, params=params)
+            params = {
+                "thumbnail_size": "SIZE_MEDIUM",
+                "limit": 10,
+                "with_audit": "true",
+                "filters": f'{{"name":{{"eq":"{filename}"}},"trashed":{{"eq":false}}}}',
+                "order_by": "modified_time",
+                "sort": "desc"
+            }
+            code, data, _ = HttpClient.request("GET", f"{self.BASE_URL}/drive/v1/files", headers=self.headers, params=params)
             if data and "files" in data and len(data["files"]) > 0:
                 return data["files"][0]["id"]
         return None
 
-    def get_user_file_url(self, file_id, use_vip=False):
-        req_headers = self.vip_headers if use_vip else self.headers
+    def get_user_file_url(self, file_id):
         for _ in range(5): 
-            code, data, _ = HttpClient.request("GET", f"{self.BASE_URL}/drive/v1/files/{file_id}", headers=req_headers, params={"usage": "FETCH"})
+            code, data, _ = HttpClient.request("GET", f"{self.BASE_URL}/drive/v1/files/{file_id}", headers=self.headers, params={"usage": "FETCH"})
             if data:
                 if data.get("web_content_link"): return data["web_content_link"]
                 if data.get("download_url"): return data["download_url"]
+                medias = data.get("medias", [])
+                if medias and len(medias) > 0:
+                     if medias[0].get("link", {}).get("url"): 
+                         return medias[0]["link"]["url"]
             time.sleep(1)
         return None
     
-    def delete_file(self, file_id, use_vip=False):
-        req_headers = self.vip_headers if use_vip else self.headers
+    def delete_file(self, file_id):
         url = f"{self.BASE_URL}/drive/v1/files:batchDelete"
         payload = {"ids": [file_id]}
-        HttpClient.request("POST", url, headers=req_headers, json_data=payload)
+        HttpClient.request("POST", url, headers=self.headers, json_data=payload)
 
 class TreeBuilder:
     def __init__(self, api): self.api = api
@@ -192,7 +178,7 @@ class TreeBuilder:
         folders = []; file_list = []
         for f in files:
             name = f.get("name", "Unknown"); file_id = f.get("id"); kind = f.get("kind", ""); size = int(f.get("size", 0)) if f.get("size") else 0
-            if kind == "drive#folder": # Updated logic as requested
+            if kind == "drive#folder":
                 folder_path = f"{parent}/{name}".strip("/")
                 sub_files = self.api.get_folder_files(share_id, file_id, pass_token)
                 children = self.build_tree(sub_files, folder_path, share_id, pass_token)

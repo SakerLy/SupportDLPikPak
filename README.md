@@ -1,20 +1,20 @@
 ## Tính năng chính
 
-- Đăng nhập chính tài khoản PikPak của bạn để tải.
-- Lấy link trực tiếp hoặc sẽ được lưu về Cloud PikPak của bạn nếu tải Video.
-- Hỗ trợ tải hàng loạt tốc độ cao (Mạng khỏe).
-- Không cần cài PikPak.
+- Sử dụng chính tài khoản của bạn để tải file về.
+- Tải video thì tool sẽ tự động lưu về cloud, khi tải xong nó sẽ tự xóa.
+- Tốc độ tải phụ thuộc vào Wifi của bạn (Đã test tối thiểu là từ 10Mb/s).
+- Không cần phải cài đặt app PikPak.
 
 ---
 
 ## Cài đặt & chạy bằng Python
 
-### 1. Cài Python 3.11  
+### 1. Cài Python (thấy ổn phiên bản thì cài bản đó khuyến nghị 3.11+)
 Tải tại: https://www.python.org/downloads/
 
 ### 2. Chạy chương trình
 ```bash
-python pikpak_downloader.py
+python main.py
 ```
 
 ---

@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from rich.panel import Panel
 from rich.prompt import Confirm
 
-# Import từ thư mục config
 from config.settings import Config, console, Language, APP_VERSION, GITHUB_REPO_URL, GITHUB_RELEASE_URL, IS_FROZEN, BASE_DIR
 
 class CacheManager:
@@ -16,7 +15,10 @@ class CacheManager:
     else: CACHE_DIR = BASE_DIR / ".cache"
     CACHE_DURATION = 3600
     @classmethod
-    def init(cls): cls.CACHE_DIR.mkdir(exist_ok=True)
+    def init(cls): 
+        try: cls.CACHE_DIR.mkdir(exist_ok=True)
+        except: pass
+        
     @classmethod
     def _get_cache_key(cls, *args): return hashlib.md5("_".join(str(arg) for arg in args).encode()).hexdigest()
     @classmethod

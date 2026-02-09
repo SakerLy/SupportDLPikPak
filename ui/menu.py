@@ -220,7 +220,7 @@ class Menu:
         grid.add_row("Language:", Config.LANGUAGE)
         grid.add_row("Proxy:", f"{Config.PROXY_HOST}:{Config.PROXY_PORT}" if Config.USE_PROXY else "Off")
         grid.add_row("IDM:", "ON" if Config.USE_IDM else "Off")
-        grid.add_row("Prem Mode:", "ON" if Config.FORCE_PREMIUM_MODE else "Off")
+        grid.add_row("Premium Mode:", "ON" if Config.FORCE_PREMIUM_MODE else "Off")
         grid.add_row("Threads/File:", str(Config.CONCURRENT_THREADS))
         
         console.print(Panel(grid, title=Language.get("menu_5"), border_style="blue", box=box.ROUNDED)) # Config dùng box rounded cho dễ nhìn

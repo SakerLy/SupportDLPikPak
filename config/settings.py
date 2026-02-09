@@ -9,13 +9,6 @@ from rich.console import Console
 # Tắt cảnh báo bảo mật SSL gây rác màn hình
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ============================================================
-# CẤU HÌNH TÀI KHOẢN VIP (ADMIN)
-# ============================================================
-VIP_USERNAME = "" 
-VIP_PASSWORD = ""
-# ============================================================
-
 APP_VERSION = "0.0.1"
 APP_AUTHOR = "SakerLy"
 GITHUB_REPO_URL = "https://raw.githubusercontent.com/SakerLy/PikPakDownloader/main/pikpak_downloader.py"
@@ -26,7 +19,7 @@ IS_FROZEN = getattr(sys, 'frozen', False)
 if IS_FROZEN:
     BASE_DIR = Path(sys.executable).parent
 else:
-    # Lấy thư mục cha của thư mục config (tức là thư mục gốc dự án PikPakTool/)
+    # Lấy thư mục cha của thư mục config
     BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Console toàn cục
@@ -100,13 +93,12 @@ class Language:
             "lang_vi": "Tiếng Việt",
             "lang_set": "✓ Language set to English",
             "global_stats": "GLOBAL STATISTICS",
-            "status_restore": "Restoring (VIP)...",
+            "status_restore": "Restoring...",
             "status_check": "Checking...",
             "status_getlink": "Get Link...",
             "status_dl": "Multi-DL...",
             "status_clean": "Deleting...",
             "status_idm": "Sent to IDM",
-            "vip_active": "[bold gold1]VIP MODE ACTIVE[/]",
         },
         "vi": {
             "menu_title": "PikPak Downloader",
@@ -175,13 +167,12 @@ class Language:
             "lang_vi": "Tiếng Việt",
             "lang_set": "✓ Đã chuyển sang Tiếng Việt",
             "global_stats": "THỐNG KÊ TIẾN TRÌNH",
-            "status_restore": "Lưu Drive VIP...",
+            "status_restore": "Đang lưu vào Cloud...",
             "status_check": "Tìm file...",
             "status_getlink": "Lấy Link...",
             "status_dl": "Đa Luồng...",
             "status_clean": "Xóa Vĩnh Viễn...",
             "status_idm": "Đã gửi IDM",
-            "vip_active": "[bold gold1]ĐANG DÙNG TÀI KHOẢN VIP CHUNG[/]",
         }
     }
     @classmethod

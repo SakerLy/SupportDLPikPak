@@ -13,7 +13,7 @@ from rich.console import Group
 from rich.align import Align
 from rich import box
 
-from config.settings import Config, console, Language, VIP_USERNAME, VIP_PASSWORD
+from config.settings import Config, console, Language
 from core.api import PikPakAPI, TreeBuilder
 
 class Downloader:
@@ -42,21 +42,13 @@ class Downloader:
         return f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
 
     def _natural_key(self, item):
-        """Hàm key để sắp xếp tự nhiên (1, 2, 10 thay vì 1, 10, 2)"""
-        # Tách chuỗi thành các phần số và chữ
         return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', item['name'])]
 
     def _recursive_sort(self, node):
-        """Sắp xếp đệ quy các file và folder theo tên (Natural Sort)"""
-        # Sắp xếp danh sách file trong node hiện tại
-        if 'files' in node:
-            node['files'].sort(key=self._natural_key)
-        
-        # Sắp xếp danh sách folder trong node hiện tại và đệ quy vào con
+        if 'files' in node: node['files'].sort(key=self._natural_key)
         if 'folders' in node:
             node['folders'].sort(key=self._natural_key)
-            for folder in node['folders']:
-                self._recursive_sort(folder)
+            for folder in node['folders']: self._recursive_sort(folder)
 
     def get_tree_and_prepare(self, url, password):
         m = re.search(r"/s/([A-Za-z0-9_-]+)", url)
@@ -67,10 +59,7 @@ class Downloader:
         if not files: console.print(f"[bold red]{Language.get('no_files')}[/]"); return None
         console.print(f"[cyan]{Language.get('analyzing')}[/]")
         tree = self.tree_builder.build_tree(files, "", share_id, ptoken)
-        
-        # Thực hiện sắp xếp cây thư mục theo Natural Sort trước khi trả về
         self._recursive_sort(tree)
-        
         return {"folders": tree["folders"], "files": tree["files"], "share_id": share_id, "pass_token": ptoken}
 
     def start_monitor(self, total_count, total_size_bytes):
@@ -102,9 +91,6 @@ class Downloader:
         )
         panel_stats = Panel(stats_grid, style="blue", title=f"[bold]{Language.get('global_stats')}[/]")
 
-        if VIP_USERNAME and VIP_PASSWORD:
-            panel_stats = Group(panel_stats, Align.center(Language.get("vip_active")))
-
         task_table = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan", expand=True)
         task_table.add_column("ID", width=4)
         task_table.add_column("Filename", ratio=3)
@@ -113,7 +99,6 @@ class Downloader:
         task_table.add_column("ETA", width=10, justify="right")
         task_table.add_column("Status", width=10, justify="center")
 
-        # Sắp xếp hiển thị trên Dashboard theo ID để dễ nhìn
         display_list.sort(key=lambda x: x['id'])
 
         for p in display_list:
@@ -122,7 +107,7 @@ class Downloader:
             if p['status'] in ["Error", "Failed", "Restore Fail", "Too Large"]: bar_color = "red"
             filled = int(20 * percent / 100)
             bar_str = f"[{bar_color}]{'━' * filled}[/][dim white]{'━' * (20 - filled)}[/]"
-            status_style = "bold red" if (p['status'] in ["Error", "Failed", "Restore Fail", "Too Large"]) else "cyan"
+            status_style = "bold red" if p['status'] in ["Error", "Failed", "Restore Fail", "Too Large"] else "cyan"
             task_table.add_row(str(p['id']), p['name'], f"{bar_str} {percent:.0f}%", f"{self.format_size(p['speed'])}/s", self.format_time(p.get('eta', 0)), f"[{status_style}]{p['status']}[/]")
         return Group(panel_stats, task_table)
 
@@ -159,9 +144,7 @@ class Downloader:
                                     eta = (file_total_size - downloaded) / speed
                                     self.progress_data[thread_id].update({'percent': percent, 'speed': speed, 'eta': eta})
             
-            if downloaded_len != expected_length:
-                return False
-
+            if downloaded_len != expected_length: return False
             return True
         except Exception: return False
 
@@ -181,34 +164,18 @@ class Downloader:
         temp_file = file_path.parent / f".{file_path.name}.tmp"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36", "Referer": "https://mypikpak.com/", "Accept": "*/*", "Accept-Encoding": "identity", "Connection": "keep-alive"}
         
-        # --- CASE 1: HEAVY FILE / PREMIUM MODE ---
+        # --- CASE 1: PREMIUM MODE (Restore -> Download -> Cleanup) ---
         if use_premium_transfer:
-            # Check file tồn tại
+            # Check exist
             if file_path.exists():
                 if file_path.stat().st_size == real_total_size:
                     self.progress_data[thread_id].update({'percent': 100, 'speed': 0, 'status': "Skipped", 'done_bytes': real_total_size})
                     return True
                 if file_path.stat().st_size > real_total_size: file_path.unlink()
 
-            use_vip_acc = False
-            if VIP_USERNAME and VIP_PASSWORD:
-                if self.api.auth_vip():
-                    use_vip_acc = True
-
-            # Kiểm tra dung lượng 6GB cho tài khoản Free
-            if not use_vip_acc and real_total_size > 6 * 1024 * 1024 * 1024:
-                self.progress_data[thread_id]['status'] = "Too Large"
-                return False
-
-            # === CƠ CHẾ KHÓA DUNG LƯỢNG (CHỈ CHO FREE USER) ===
-            # Nếu là User Free, ta dùng Lock để ép tải tuần tự từng file một.
-            # Điều này đảm bảo: Restore -> Tải -> Xóa xong rồi mới đến file khác.
-            # Tránh việc Restore ồ ạt 3-4 file cùng lúc làm đầy bộ nhớ 6GB.
-            should_lock = not use_vip_acc
-            
-            if should_lock:
-                self.progress_data[thread_id]['status'] = "Waiting..."
-                self.storage_lock.acquire()
+            # Always lock for restore mode to prevent cloud storage overflow
+            self.progress_data[thread_id]['status'] = "Waiting..."
+            self.storage_lock.acquire()
 
             my_file_id = None
             download_success = False
@@ -216,12 +183,12 @@ class Downloader:
             try:
                 # 1. Restore
                 self.progress_data[thread_id]['status'] = Language.get('status_restore')
-                my_file_id = self.api.restore_and_poll(share_id, file_data['id'], pass_token, use_vip=use_vip_acc)
+                my_file_id = self.api.restore_and_poll(share_id, file_data['id'], pass_token)
                 
-                # Fallback tìm kiếm
+                # Fallback
                 if not my_file_id:
                     self.progress_data[thread_id]['status'] = Language.get('status_check')
-                    my_file_id = self.api.wait_for_file(name, use_vip=use_vip_acc)
+                    my_file_id = self.api.wait_for_file(name)
                 
                 if not my_file_id:
                     self.progress_data[thread_id]['status'] = "Restore Fail"
@@ -230,18 +197,12 @@ class Downloader:
                 # 2. Get Link
                 self.progress_data[thread_id]['status'] = Language.get('status_getlink')
                 time.sleep(2) 
-                download_url = self.api.get_user_file_url(my_file_id, use_vip=use_vip_acc)
+                download_url = self.api.get_user_file_url(my_file_id)
                 if not download_url:
                     self.progress_data[thread_id]['status'] = "No Link"
                     return False
 
-                # 3a. IDM Check
-                if Config.USE_IDM and os.name == 'nt':
-                    if self.call_idm(download_url, name, save_dir):
-                        self.progress_data[thread_id].update({'percent': 100, 'status': Language.get('status_idm'), 'done_bytes': real_total_size})
-                        download_success = True
-                        return True
-
+                # 3a. IDM (Disabled for Restore Mode)
                 # 3b. Multi-Threaded DL (Internal)
                 if not file_path.exists() or file_path.stat().st_size == 0:
                     try:
@@ -271,7 +232,7 @@ class Downloader:
                         self.progress_data[thread_id]['status'] = "Error"
                         if file_path.exists(): file_path.unlink()
 
-                # 4. Single-Thread Fallback (Nếu Multi-thread fail hoặc cần Resume)
+                # 4. Fallback Resume
                 if not download_success:
                     retry_count = 0
                     while True:
@@ -288,7 +249,7 @@ class Downloader:
                         
                         try:
                             with requests.get(download_url, headers=curr_headers, stream=True, timeout=30, verify=False, proxies=Config.get_proxy_dict()) as r:
-                                if r.status_code in [403, 401]: self.progress_data[thread_id]['status'] = "Refresh Link"; download_url = self.api.get_user_file_url(my_file_id, use_vip=use_vip_acc); time.sleep(1); continue
+                                if r.status_code in [403, 401]: self.progress_data[thread_id]['status'] = "Refresh Link"; download_url = self.api.get_user_file_url(my_file_id); time.sleep(1); continue
                                 if r.status_code == 416: 
                                     if file_path.stat().st_size == real_total_size: download_success = True; break
                                     file_path.unlink(missing_ok=True); current_size = 0; continue
@@ -316,17 +277,13 @@ class Downloader:
                                 break
             
             finally:
-                # --- QUAN TRỌNG: LUÔN XÓA FILE TRÊN CLOUD SAU KHI TẢI (HOẶC LỖI) ---
                 if my_file_id:
                     self.progress_data[thread_id]['status'] = Language.get('status_clean')
-                    self.api.delete_file(my_file_id, use_vip=use_vip_acc)
-                    # Trả lại trạng thái Done nếu đã tải xong
+                    self.api.delete_file(my_file_id)
                     if download_success:
                         self.progress_data[thread_id]['status'] = "Done"
                 
-                # Giải phóng Lock cho file tiếp theo
-                if should_lock:
-                    self.storage_lock.release()
+                self.storage_lock.release()
             
             return download_success
 
@@ -363,7 +320,7 @@ class Downloader:
                             if time.time() - last_time >= 0.5:
                                 speed = (done - last_done) / (time.time() - last_time); percent = (done / real_total_size) * 100 if real_total_size else 0
                                 eta = (real_total_size - done) / speed if speed > 0 else 0
-                                self.progress_data[thread_id].update({'percent': percent, 'speed': speed, 'status': "DL Image", 'done_bytes': done, 'eta': eta}); last_time = time.time(); last_done = done
+                                self.progress_data[thread_id].update({'percent': percent, 'speed': speed, 'status': "DL Direct", 'done_bytes': done, 'eta': eta}); last_time = time.time(); last_done = done
                 if temp_file.stat().st_size >= real_total_size: temp_file.rename(file_path); self.progress_data[thread_id].update({'percent': 100, 'status': "Done"}); return True
                 return False
             except: 
