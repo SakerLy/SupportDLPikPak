@@ -24,7 +24,14 @@ class Downloader:
         self.total_files_count = 0 
         self.total_batch_size = 0
         self.file_progress_locks = {}
-        self.storage_lock = threading.Lock()
+
+    def reset_progress(self):
+        """Reset trạng thái để chuẩn bị cho lần tải lại (Retry)"""
+        self.progress_data = {}
+        self.monitor_active = False
+        self.total_files_count = 0
+        self.total_batch_size = 0
+        self.file_progress_locks = {}
 
     @staticmethod
     def format_size(size):
@@ -165,26 +172,23 @@ class Downloader:
         temp_file = file_path.parent / f".{file_path.name}.tmp"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36", "Referer": "https://mypikpak.com/", "Accept": "*/*", "Accept-Encoding": "identity", "Connection": "keep-alive"}
         
-        # IMPORT RE Module locally as it might be missing in scope
+        # IMPORT RE Module locally
         import re
 
-        # --- CASE 1: HEAVY FILE (RESTORE -> SEARCH -> GET LINK -> MULTI-DL -> DELETE) ---
+        # --- CASE 1: HEAVY FILE / PREMIUM MODE (Restore -> Download -> Cleanup) ---
         if use_premium_transfer:
+            # Check exist
             if file_path.exists():
                 if file_path.stat().st_size == real_total_size:
                     self.progress_data[thread_id].update({'percent': 100, 'speed': 0, 'status': "Skipped", 'done_bytes': real_total_size})
                     return True
                 if file_path.stat().st_size > real_total_size: file_path.unlink()
 
-            # Always lock to ensure sequential download (protect cloud storage)
-            self.progress_data[thread_id]['status'] = "Waiting..."
-            self.storage_lock.acquire()
-
             my_file_id = None
             download_success = False
 
             try:
-                # 0. PRE-CLEANUP
+                # 0. PRE-CLEANUP: Tìm và xóa file cũ cùng tên (Smart Prediction)
                 existing_id = self.api.wait_for_file(name, max_retries=1)
                 if existing_id:
                     self.progress_data[thread_id]['status'] = "Cleaning Old..."
@@ -195,7 +199,7 @@ class Downloader:
                 self.progress_data[thread_id]['status'] = Language.get('status_restore')
                 my_file_id = self.api.restore_and_poll(share_id, file_data['id'], pass_token)
                 
-                # Fallback if task ID logic fails
+                # Fallback if task ID logic fails (Smart Prediction)
                 if not my_file_id:
                     self.progress_data[thread_id]['status'] = Language.get('status_check')
                     my_file_id = self.api.wait_for_file(name)
@@ -213,8 +217,13 @@ class Downloader:
                     self.api.delete_file(my_file_id)
                     return False
 
-                # 3a. IDM Check (Disabled for Restore Mode to ensure cleanup)
-                
+                # 3a. IDM Check
+                if Config.USE_IDM and os.name == 'nt':
+                    if self.call_idm(download_url, name, save_dir):
+                        self.progress_data[thread_id].update({'percent': 100, 'status': Language.get('status_idm'), 'done_bytes': real_total_size})
+                        download_success = True
+                        return True
+
                 # 3b. Multi-Threaded DL (Internal)
                 if not file_path.exists() or file_path.stat().st_size == 0:
                     try:
@@ -244,7 +253,7 @@ class Downloader:
                         self.progress_data[thread_id]['status'] = "Error"
                         if file_path.exists(): file_path.unlink()
 
-                # 4. Fallback Resume
+                # 4. Fallback Resume (Nếu Multi-thread fail hoặc cần Resume)
                 if not download_success:
                     retry_count = 0
                     while True:
@@ -290,13 +299,12 @@ class Downloader:
                                 break
             
             finally:
+                # Cleanup Cloud File
                 if my_file_id:
                     self.progress_data[thread_id]['status'] = Language.get('status_clean')
                     self.api.delete_file(my_file_id)
                     if download_success:
                         self.progress_data[thread_id]['status'] = "Done"
-                
-                self.storage_lock.release()
             
             return download_success
 
