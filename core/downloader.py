@@ -12,7 +12,6 @@ from rich.panel import Panel
 from rich.console import Group
 from rich.align import Align
 from rich import box
-
 from config.settings import Config, console, Language
 from core.api import PikPakAPI, TreeBuilder
 
@@ -144,7 +143,9 @@ class Downloader:
                                     eta = (file_total_size - downloaded) / speed
                                     self.progress_data[thread_id].update({'percent': percent, 'speed': speed, 'eta': eta})
             
-            if downloaded_len != expected_length: return False
+            if downloaded_len != expected_length:
+                return False
+
             return True
         except Exception: return False
 
@@ -164,16 +165,18 @@ class Downloader:
         temp_file = file_path.parent / f".{file_path.name}.tmp"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36", "Referer": "https://mypikpak.com/", "Accept": "*/*", "Accept-Encoding": "identity", "Connection": "keep-alive"}
         
-        # --- CASE 1: PREMIUM MODE (Restore -> Download -> Cleanup) ---
+        # IMPORT RE Module locally as it might be missing in scope
+        import re
+
+        # --- CASE 1: HEAVY FILE (RESTORE -> SEARCH -> GET LINK -> MULTI-DL -> DELETE) ---
         if use_premium_transfer:
-            # Check exist
             if file_path.exists():
                 if file_path.stat().st_size == real_total_size:
                     self.progress_data[thread_id].update({'percent': 100, 'speed': 0, 'status': "Skipped", 'done_bytes': real_total_size})
                     return True
                 if file_path.stat().st_size > real_total_size: file_path.unlink()
 
-            # Always lock for restore mode to prevent cloud storage overflow
+            # Always lock to ensure sequential download (protect cloud storage)
             self.progress_data[thread_id]['status'] = "Waiting..."
             self.storage_lock.acquire()
 
@@ -181,11 +184,18 @@ class Downloader:
             download_success = False
 
             try:
+                # 0. PRE-CLEANUP
+                existing_id = self.api.wait_for_file(name, max_retries=1)
+                if existing_id:
+                    self.progress_data[thread_id]['status'] = "Cleaning Old..."
+                    self.api.delete_file(existing_id)
+                    time.sleep(1)
+
                 # 1. Restore
                 self.progress_data[thread_id]['status'] = Language.get('status_restore')
                 my_file_id = self.api.restore_and_poll(share_id, file_data['id'], pass_token)
                 
-                # Fallback
+                # Fallback if task ID logic fails
                 if not my_file_id:
                     self.progress_data[thread_id]['status'] = Language.get('status_check')
                     my_file_id = self.api.wait_for_file(name)
@@ -200,9 +210,11 @@ class Downloader:
                 download_url = self.api.get_user_file_url(my_file_id)
                 if not download_url:
                     self.progress_data[thread_id]['status'] = "No Link"
+                    self.api.delete_file(my_file_id)
                     return False
 
-                # 3a. IDM (Disabled for Restore Mode)
+                # 3a. IDM Check (Disabled for Restore Mode to ensure cleanup)
+                
                 # 3b. Multi-Threaded DL (Internal)
                 if not file_path.exists() or file_path.stat().st_size == 0:
                     try:
@@ -274,6 +286,7 @@ class Downloader:
                                 self.progress_data[thread_id]['status'] = "Failed"
                                 if file_path.exists(): file_path.unlink()
                                 if temp_file.exists(): temp_file.unlink()
+                                if my_file_id: self.api.delete_file(my_file_id)
                                 break
             
             finally:
