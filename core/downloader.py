@@ -15,23 +15,33 @@ from rich import box
 from config.settings import Config, console, Language
 from core.api import PikPakAPI, TreeBuilder
 
+
+class _CancelledError(Exception):
+    """Sentinel: thoát khỏi vòng lặp chunk khi cancel, để finally xóa cloud."""
+    pass
+
+
 class Downloader:
     def __init__(self):
         self.api = PikPakAPI()
         self.tree_builder = TreeBuilder(self.api)
-        self.progress_data = {} 
-        self.monitor_active = False
-        self.total_files_count = 0 
-        self.total_batch_size = 0
-        self.file_progress_locks = {}
-
-    def reset_progress(self):
-        """Reset trạng thái để chuẩn bị cho lần tải lại (Retry)"""
         self.progress_data = {}
         self.monitor_active = False
         self.total_files_count = 0
         self.total_batch_size = 0
         self.file_progress_locks = {}
+        self.cancel_event = threading.Event()
+
+    def reset_progress(self):
+        """Reset state for retry / new batch."""
+        self.progress_data = {}
+        self.monitor_active = False
+        self.total_files_count = 0
+        self.total_batch_size = 0
+        self.file_progress_locks = {}
+        self.cancel_event = threading.Event() 
+
+    # ── Formatting helpers ────────────────────────────────────────────────────
 
     @staticmethod
     def format_size(size):
@@ -48,94 +58,151 @@ class Downloader:
         return f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
 
     def _natural_key(self, item):
-        return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', item['name'])]
+        return [int(s) if s.isdigit() else s.lower()
+                for s in re.split(r'(\d+)', item['name'])]
 
     def _recursive_sort(self, node):
-        if 'files' in node: node['files'].sort(key=self._natural_key)
+        if 'files' in node:   node['files'].sort(key=self._natural_key)
         if 'folders' in node:
             node['folders'].sort(key=self._natural_key)
             for folder in node['folders']: self._recursive_sort(folder)
 
+    # ── Tree / API helpers ────────────────────────────────────────────────────
+
     def get_tree_and_prepare(self, url, password):
         m = re.search(r"/s/([A-Za-z0-9_-]+)", url)
-        if not m: console.print(f"[bold red]{Language.get('link_invalid')}[/]"); return None
+        if not m:
+            console.print(f"[bold red]{Language.get('link_invalid')}[/]")
+            return None
         share_id = m.group(1)
         if not self.api.refresh_token(): return None
         files, ptoken = self.api.get_share_info(share_id, password)
-        if not files: console.print(f"[bold red]{Language.get('no_files')}[/]"); return None
+        if not files:
+            console.print(f"[bold red]{Language.get('no_files')}[/]")
+            return None
         console.print(f"[cyan]{Language.get('analyzing')}[/]")
         tree = self.tree_builder.build_tree(files, "", share_id, ptoken)
         self._recursive_sort(tree)
-        return {"folders": tree["folders"], "files": tree["files"], "share_id": share_id, "pass_token": ptoken}
+        return {"folders": tree["folders"], "files": tree["files"],
+                "share_id": share_id, "pass_token": ptoken}
+
+    # ── Monitor ───────────────────────────────────────────────────────────────
 
     def start_monitor(self, total_count, total_size_bytes):
-        self.monitor_active = True
+        self.monitor_active    = True
         self.total_files_count = total_count
-        self.total_batch_size = total_size_bytes
-        self.batch_start_time = time.time()
+        self.total_batch_size  = total_size_bytes
+        self.batch_start_time  = time.time()
 
     def stop_monitor(self): self.monitor_active = False
 
     def generate_dashboard_table(self):
-        all_threads = list(self.progress_data.values())
-        done_count = sum(1 for p in all_threads if p['status'] == "Done")
+        all_threads  = list(self.progress_data.values())
+        done_count   = sum(1 for p in all_threads if p['status'] == "Done")
         skipped_count = sum(1 for p in all_threads if p['status'] == "Skipped")
-        display_list = [p for p in all_threads if p['status'] not in ["Done", "Skipped", Language.get('status_idm')]]
-        total_speed = sum(p['speed'] for p in display_list)
-        total_downloaded = sum(p.get('done_bytes', 0) for p in all_threads)
-        remaining_bytes = max(0, self.total_batch_size - total_downloaded)
-        eta_str = self.format_time(remaining_bytes / total_speed) if total_speed > 0 else "--:--"
-        
+        cancelled_count = sum(1 for p in all_threads if p['status'] == "Cancelled")
+
+        display_list = [p for p in all_threads
+                        if p['status'] not in ("Done", "Skipped",
+                                               Language.get('status_idm'),
+                                               "Cancelled")]
+        total_speed       = sum(p['speed'] for p in display_list)
+        total_downloaded  = sum(p.get('done_bytes', 0) for p in all_threads)
+        remaining_bytes   = max(0, self.total_batch_size - total_downloaded)
+        eta_str           = (self.format_time(remaining_bytes / total_speed)
+                             if total_speed > 0 else "--:--")
+
+        # Cancel hint
+        cancel_hint = (
+            "[bold red] ⛔ CANCELLING...[/]"
+            if self.cancel_event.is_set()
+            else "  [#e81c3e]Press [bold]Q[/bold] to cancel[/]"
+        )
+
         stats_grid = Table.grid(expand=True)
         stats_grid.add_column(justify="center", ratio=1)
         stats_grid.add_column(justify="center", ratio=1)
         stats_grid.add_column(justify="center", ratio=1)
         stats_grid.add_row(
-            f"[bold cyan]Queue: {self.total_files_count - done_count - skipped_count}[/]",
-            f"[bold green]Done: {done_count}[/] | [bold yellow]Skip: {skipped_count}[/]",
-            f"[bold white]Speed: {self.format_size(total_speed)}/s[/] | [bold white]ETA: {eta_str}[/]"
+            f"[bold cyan]Queue: {self.total_files_count - done_count - skipped_count - cancelled_count}[/]",
+            f"[bold green]Done: {done_count}[/] | [bold yellow]Skip: {skipped_count}[/]"
+            + (f" | [bold red]Cancel: {cancelled_count}[/]" if cancelled_count else ""),
+            f"[bold white]Speed: {self.format_size(total_speed)}/s[/] | "
+            f"[bold white]ETA: {eta_str}[/]"
         )
-        panel_stats = Panel(stats_grid, style="blue", title=f"[bold]{Language.get('global_stats')}[/]")
+        panel_stats = Panel(
+            Group(stats_grid, cancel_hint),
+            style="blue",
+            title=f"[bold]{Language.get('global_stats')}[/]"
+        )
 
-        task_table = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan", expand=True)
-        task_table.add_column("ID", width=4)
+        task_table = Table(box=box.SIMPLE, show_header=True,
+                           header_style="bold cyan", expand=True)
+        task_table.add_column("ID",       width=4)
         task_table.add_column("Filename", ratio=3)
         task_table.add_column("Progress", ratio=2)
-        task_table.add_column("Speed", width=12, justify="right")
-        task_table.add_column("ETA", width=10, justify="right")
-        task_table.add_column("Status", width=10, justify="center")
+        task_table.add_column("Speed",    width=12, justify="right")
+        task_table.add_column("ETA",      width=10, justify="right")
+        task_table.add_column("Status",   width=12, justify="center")
 
         display_list.sort(key=lambda x: x['id'])
-
         for p in display_list:
-            percent = p['percent']
+            percent   = p['percent']
             bar_color = "green" if percent == 100 else "cyan"
-            if p['status'] in ["Error", "Failed", "Restore Fail", "Too Large"]: bar_color = "red"
-            filled = int(20 * percent / 100)
-            bar_str = f"[{bar_color}]{'━' * filled}[/][dim white]{'━' * (20 - filled)}[/]"
-            status_style = "bold red" if p['status'] in ["Error", "Failed", "Restore Fail", "Too Large"] else "cyan"
-            task_table.add_row(str(p['id']), p['name'], f"{bar_str} {percent:.0f}%", f"{self.format_size(p['speed'])}/s", self.format_time(p.get('eta', 0)), f"[{status_style}]{p['status']}[/]")
+            if p['status'] in ("Error", "Failed", "Restore Fail",
+                               "Too Large", "Cancelled", "Cancelling..."):
+                bar_color = "red"
+            filled  = int(20 * percent / 100)
+            bar_str = (f"[{bar_color}]{'━' * filled}[/]"
+                       f"[dim white]{'━' * (20 - filled)}[/]")
+            if p['status'] in ("Error", "Failed", "Restore Fail",
+                               "Too Large", "Cancelled"):
+                status_style = "bold red"
+            elif p['status'] == "Cancelling...":
+                status_style = "bold yellow"
+            else:
+                status_style = "cyan"
+            task_table.add_row(
+                str(p['id']), p['name'],
+                f"{bar_str} {percent:.0f}%",
+                f"{self.format_size(p['speed'])}/s",
+                self.format_time(p.get('eta', 0)),
+                f"[{status_style}]{p['status']}[/]"
+            )
         return Group(panel_stats, task_table)
+
+    # ── IDM helper ────────────────────────────────────────────────────────────
 
     def call_idm(self, url, filename, save_dir):
         if not os.path.exists(Config.IDM_PATH): return False
         try:
-            subprocess.Popen([Config.IDM_PATH, '/d', url, '/p', str(save_dir.absolute()), '/f', filename, '/n', '/a', '/s'])
+            subprocess.Popen([Config.IDM_PATH, '/d', url, '/p',
+                              str(save_dir.absolute()), '/f', filename,
+                              '/n', '/a', '/s'])
             return True
-        except: return False
-    
-    def _download_segment(self, url, headers, file_path, start, end, thread_id, progress_lock, file_total_size, start_time):
+        except:
+            return False
+
+    # ── Segment download (multi-thread per file) ──────────────────────────────
+
+    def _download_segment(self, url, headers, file_path, start, end,
+                          thread_id, progress_lock, file_total_size, start_time):
         try:
             req_headers = headers.copy()
             req_headers['Range'] = f"bytes={start}-{end}"
-            expected_length = end - start + 1
-            downloaded_len = 0
+            expected_length  = end - start + 1
+            downloaded_len   = 0
 
-            with requests.get(url, headers=req_headers, stream=True, timeout=60, verify=False, proxies=Config.get_proxy_dict()) as r:
+            with requests.get(url, headers=req_headers, stream=True,
+                              timeout=60, verify=False,
+                              proxies=Config.get_proxy_dict()) as r:
                 r.raise_for_status()
                 with open(file_path, "r+b") as f:
                     f.seek(start)
-                    for chunk in r.iter_content(chunk_size=1024*256):
+                    for chunk in r.iter_content(chunk_size=1024 * 256):
+                        # Cancel check inside segment loop
+                        if self.cancel_event.is_set():
+                            return False
                         if chunk:
                             f.write(chunk)
                             chunk_len = len(chunk)
@@ -143,52 +210,96 @@ class Downloader:
                             with progress_lock:
                                 self.progress_data[thread_id]['done_bytes'] += chunk_len
                                 downloaded = self.progress_data[thread_id]['done_bytes']
-                                duration = time.time() - start_time
+                                duration   = time.time() - start_time
                                 if duration > 0:
-                                    speed = downloaded / duration
+                                    speed   = downloaded / duration
                                     percent = (downloaded / file_total_size) * 100
-                                    eta = (file_total_size - downloaded) / speed
-                                    self.progress_data[thread_id].update({'percent': percent, 'speed': speed, 'eta': eta})
-            
+                                    eta     = (file_total_size - downloaded) / speed
+                                    self.progress_data[thread_id].update(
+                                        {'percent': percent, 'speed': speed, 'eta': eta})
+
             if downloaded_len != expected_length:
                 return False
-
             return True
-        except Exception: return False
+        except Exception:
+            return False
+
+    # ── Main download entry ───────────────────────────────────────────────────
 
     def download_single_file(self, file_data, share_id, pass_token, thread_id):
-        name = file_data['name']
+        # ── Early cancel check ────────────────────────────────────────────────
+        if self.cancel_event.is_set():
+            self.progress_data[thread_id] = {
+                'id': thread_id, 'name': file_data['name'],
+                'percent': 0, 'speed': 0, 'status': 'Cancelled',
+                'done_bytes': 0, 'total_bytes': int(file_data.get('size', 0)), 'eta': 0
+            }
+            return False
+
+        name            = file_data['name']
         real_total_size = int(file_data['size'])
-        HEAVY_EXTS = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ts', '.iso', '.m4v', '.rar', '.zip', '.7z']
-        is_heavy_file = any(name.lower().endswith(ext) for ext in HEAVY_EXTS)
+        HEAVY_EXTS      = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv',
+                           '.webm', '.ts', '.iso', '.m4v', '.rar', '.zip', '.7z']
+        is_heavy_file         = any(name.lower().endswith(ext) for ext in HEAVY_EXTS)
+        use_premium_transfer  = is_heavy_file or Config.FORCE_PREMIUM_MODE
 
-        use_premium_transfer = is_heavy_file or Config.FORCE_PREMIUM_MODE
+        self.progress_data[thread_id] = {
+            'id': thread_id, 'name': name, 'percent': 0, 'speed': 0,
+            'status': "Init...", 'done_bytes': 0,
+            'total_bytes': real_total_size, 'eta': 0
+        }
 
-        self.progress_data[thread_id] = {'id': thread_id, 'name': name, 'percent': 0, 'speed': 0, 'status': "Init...", 'done_bytes': 0, 'total_bytes': real_total_size, 'eta': 0}
-        
-        save_dir = Config.get_download_dir() / Path(file_data['path']).parent
+        save_dir  = Config.get_download_dir() / Path(file_data['path']).parent
         save_dir.mkdir(parents=True, exist_ok=True)
         file_path = save_dir / name
         temp_file = file_path.parent / f".{file_path.name}.tmp"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36", "Referer": "https://mypikpak.com/", "Accept": "*/*", "Accept-Encoding": "identity", "Connection": "keep-alive"}
-        
-        # IMPORT RE Module locally
-        import re
+        headers   = {
+            "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/124.0.0.0 Safari/537.36",
+            "Referer":         "https://mypikpak.com/",
+            "Accept":          "*/*",
+            "Accept-Encoding": "identity",
+            "Connection":      "keep-alive"
+        }
 
-        # --- CASE 1: HEAVY FILE / PREMIUM MODE (Restore -> Download -> Cleanup) ---
+        import re  # local import kept for compat
+
+        # ── Helpers ───────────────────────────────────────────────────────────
+        def _clean_local():
+            """Xóa file local dở dang khi cancel."""
+            if file_path.exists(): file_path.unlink(missing_ok=True)
+            if temp_file.exists(): temp_file.unlink(missing_ok=True)
+
+        def _mark_cancelled():
+            self.progress_data[thread_id]['status'] = 'Cancelled'
+
+        def _cancel_and_cleanup_local():
+            """Đánh dấu cancelled + xóa file local. Cloud file do finally xử lý."""
+            _clean_local()
+            _mark_cancelled()
+
+        # ─────────────────────────────────────────────────────────────────────
+        # CASE 1: HEAVY / PREMIUM (Restore → Download → Cleanup)
+        # ─────────────────────────────────────────────────────────────────────
         if use_premium_transfer:
-            # Check exist
             if file_path.exists():
                 if file_path.stat().st_size == real_total_size:
-                    self.progress_data[thread_id].update({'percent': 100, 'speed': 0, 'status': "Skipped", 'done_bytes': real_total_size})
+                    self.progress_data[thread_id].update(
+                        {'percent': 100, 'speed': 0, 'status': "Skipped",
+                         'done_bytes': real_total_size})
                     return True
-                if file_path.stat().st_size > real_total_size: file_path.unlink()
+                if file_path.stat().st_size > real_total_size:
+                    file_path.unlink()
 
-            my_file_id = None
+            my_file_id       = None
             download_success = False
+            was_cancelled    = False  
 
             try:
-                # 0. PRE-CLEANUP: Tìm và xóa file cũ cùng tên (Smart Prediction)
+                # 0. Pre-cleanup
+                if self.cancel_event.is_set():
+                    was_cancelled = True; _mark_cancelled(); return False
                 existing_id = self.api.wait_for_file(name, max_retries=1)
                 if existing_id:
                     self.progress_data[thread_id]['status'] = "Cleaning Old..."
@@ -196,98 +307,151 @@ class Downloader:
                     time.sleep(1)
 
                 # 1. Restore
+                if self.cancel_event.is_set():
+                    was_cancelled = True; _mark_cancelled(); return False
                 self.progress_data[thread_id]['status'] = Language.get('status_restore')
                 my_file_id = self.api.restore_and_poll(share_id, file_data['id'], pass_token)
-                
-                # Fallback if task ID logic fails (Smart Prediction)
+
                 if not my_file_id:
                     self.progress_data[thread_id]['status'] = Language.get('status_check')
                     my_file_id = self.api.wait_for_file(name)
-                
+
                 if not my_file_id:
                     self.progress_data[thread_id]['status'] = "Restore Fail"
                     return False
-                
-                # 2. Get Link
+
+                # 2. Get link
+                if self.cancel_event.is_set():
+                    was_cancelled = True; _cancel_and_cleanup_local(); return False
                 self.progress_data[thread_id]['status'] = Language.get('status_getlink')
-                time.sleep(2) 
+                time.sleep(2)
                 download_url = self.api.get_user_file_url(my_file_id)
                 if not download_url:
                     self.progress_data[thread_id]['status'] = "No Link"
                     self.api.delete_file(my_file_id)
                     return False
 
-                # 3a. IDM Check
+                # 3a. IDM
                 if Config.USE_IDM and os.name == 'nt':
                     if self.call_idm(download_url, name, save_dir):
-                        self.progress_data[thread_id].update({'percent': 100, 'status': Language.get('status_idm'), 'done_bytes': real_total_size})
+                        self.progress_data[thread_id].update(
+                            {'percent': 100, 'status': Language.get('status_idm'),
+                             'done_bytes': real_total_size})
                         download_success = True
                         return True
 
-                # 3b. Multi-Threaded DL (Internal)
+                # 3b. Multi-threaded download
+                if self.cancel_event.is_set():
+                    was_cancelled = True; _cancel_and_cleanup_local(); return False
                 if not file_path.exists() or file_path.stat().st_size == 0:
                     try:
-                        with open(file_path, "wb") as f: f.truncate(real_total_size)
-                        num_threads = Config.CONCURRENT_THREADS
-                        chunk_size = real_total_size // num_threads
-                        futures = []
+                        with open(file_path, "wb") as f:
+                            f.truncate(real_total_size)
+                        num_threads   = Config.CONCURRENT_THREADS
+                        chunk_size    = real_total_size // num_threads
+                        futures       = []
                         progress_lock = threading.Lock()
-                        start_time = time.time()
+                        start_time    = time.time()
                         self.progress_data[thread_id]['status'] = f"DL ({num_threads} threads)"
 
                         with ThreadPoolExecutor(max_workers=num_threads) as executor:
                             for i in range(num_threads):
                                 start = i * chunk_size
-                                end = start + chunk_size - 1 if i < num_threads - 1 else real_total_size - 1
-                                futures.append(executor.submit(self._download_segment, download_url, headers, file_path, start, end, thread_id, progress_lock, real_total_size, start_time))
+                                end   = (start + chunk_size - 1
+                                         if i < num_threads - 1
+                                         else real_total_size - 1)
+                                futures.append(executor.submit(
+                                    self._download_segment,
+                                    download_url, headers, file_path,
+                                    start, end, thread_id, progress_lock,
+                                    real_total_size, start_time))
                             results = [f.result() for f in as_completed(futures)]
-                        
+
+                        if self.cancel_event.is_set():
+                            was_cancelled = True
+                            _cancel_and_cleanup_local()
+                            return False
+
                         if all(results) and file_path.stat().st_size == real_total_size:
-                            self.progress_data[thread_id].update({'percent': 100, 'speed': 0, 'status': "Done", 'done_bytes': real_total_size})
+                            self.progress_data[thread_id].update(
+                                {'percent': 100, 'speed': 0, 'status': "Done",
+                                 'done_bytes': real_total_size})
                             download_success = True
-                        else: 
+                        else:
                             self.progress_data[thread_id]['status'] = "Switch Single..."
                             if file_path.exists(): file_path.unlink()
                             self.progress_data[thread_id]['done_bytes'] = 0
-                    except: 
+                    except:
                         self.progress_data[thread_id]['status'] = "Error"
                         if file_path.exists(): file_path.unlink()
 
-                # 4. Fallback Resume (Nếu Multi-thread fail hoặc cần Resume)
+                # 4. Fallback / resume single-thread
                 if not download_success:
                     retry_count = 0
                     while True:
-                        current_size = 0
-                        if file_path.exists(): current_size = file_path.stat().st_size
+                        if self.cancel_event.is_set():
+                            was_cancelled = True
+                            _cancel_and_cleanup_local()
+                            return False
+
+                        current_size = file_path.stat().st_size if file_path.exists() else 0
                         if current_size >= real_total_size:
-                            self.progress_data[thread_id].update({'percent': 100, 'speed': 0, 'status': "Done", 'done_bytes': real_total_size})
+                            self.progress_data[thread_id].update(
+                                {'percent': 100, 'speed': 0, 'status': "Done",
+                                 'done_bytes': real_total_size})
                             download_success = True
                             break
-                        
-                        mode = 'ab' if current_size > 0 else 'wb'
+
+                        mode         = 'ab' if current_size > 0 else 'wb'
                         curr_headers = headers.copy()
-                        if current_size > 0: curr_headers['Range'] = f"bytes={current_size}-"; self.progress_data[thread_id]['status'] = f"Resume {int(current_size/1024/1024)}MB"
-                        
+                        if current_size > 0:
+                            curr_headers['Range'] = f"bytes={current_size}-"
+                            self.progress_data[thread_id]['status'] = (
+                                f"Resume {int(current_size/1024/1024)}MB")
+
                         try:
-                            with requests.get(download_url, headers=curr_headers, stream=True, timeout=30, verify=False, proxies=Config.get_proxy_dict()) as r:
-                                if r.status_code in [403, 401]: self.progress_data[thread_id]['status'] = "Refresh Link"; download_url = self.api.get_user_file_url(my_file_id); time.sleep(1); continue
-                                if r.status_code == 416: 
-                                    if file_path.stat().st_size == real_total_size: download_success = True; break
-                                    file_path.unlink(missing_ok=True); current_size = 0; continue
+                            with requests.get(download_url, headers=curr_headers,
+                                              stream=True, timeout=30, verify=False,
+                                              proxies=Config.get_proxy_dict()) as r:
+                                if r.status_code in [403, 401]:
+                                    self.progress_data[thread_id]['status'] = "Refresh Link"
+                                    download_url = self.api.get_user_file_url(my_file_id)
+                                    time.sleep(1); continue
+                                if r.status_code == 416:
+                                    if file_path.stat().st_size == real_total_size:
+                                        download_success = True; break
+                                    file_path.unlink(missing_ok=True); continue
                                 r.raise_for_status()
                                 self.progress_data[thread_id]['status'] = Language.get('status_dl')
-                                start_time = time.time(); downloaded_session = 0; last_ui_time = start_time
+                                start_time         = time.time()
+                                downloaded_session = 0
+                                last_ui_time       = start_time
                                 with open(file_path, mode) as f:
-                                    for chunk in r.iter_content(chunk_size=4*1024*1024):
+                                    for chunk in r.iter_content(chunk_size=4 * 1024 * 1024):
+                                        if self.cancel_event.is_set():
+                                            was_cancelled = True
+                                            raise _CancelledError()
                                         if chunk:
-                                            f.write(chunk); downloaded_session += len(chunk); total_down = current_size + downloaded_session
+                                            f.write(chunk)
+                                            downloaded_session += len(chunk)
+                                            total_down = current_size + downloaded_session
                                             if time.time() - last_ui_time >= 1:
-                                                speed = downloaded_session / (time.time() - start_time); percent = (total_down / real_total_size) * 100
-                                                eta = (real_total_size - total_down) / speed if speed > 0 else 0
-                                                self.progress_data[thread_id].update({'percent': percent, 'speed': speed, 'done_bytes': total_down, 'eta': eta}); last_ui_time = time.time()
-                            if file_path.stat().st_size < real_total_size: raise Exception("Incomplete")
-                            else: download_success = True; break
-                        except: 
+                                                speed   = downloaded_session / (time.time() - start_time)
+                                                percent = (total_down / real_total_size) * 100
+                                                eta     = ((real_total_size - total_down) / speed
+                                                           if speed > 0 else 0)
+                                                self.progress_data[thread_id].update(
+                                                    {'percent': percent, 'speed': speed,
+                                                     'done_bytes': total_down, 'eta': eta})
+                                                last_ui_time = time.time()
+                            if file_path.stat().st_size < real_total_size:
+                                raise Exception("Incomplete")
+                            else:
+                                download_success = True; break
+                        except _CancelledError:
+                            _cancel_and_cleanup_local()
+                            return False
+                        except:
                             retry_count += 1
                             self.progress_data[thread_id]['status'] = f"Retry {retry_count}"
                             time.sleep(2)
@@ -297,54 +461,95 @@ class Downloader:
                                 if temp_file.exists(): temp_file.unlink()
                                 if my_file_id: self.api.delete_file(my_file_id)
                                 break
-            
+
             finally:
-                # Cleanup Cloud File
                 if my_file_id:
-                    self.progress_data[thread_id]['status'] = Language.get('status_clean')
+                    if was_cancelled:
+                        self.progress_data[thread_id]['status'] = "Cloud Clean..."
+                    else:
+                        self.progress_data[thread_id]['status'] = Language.get('status_clean')
                     self.api.delete_file(my_file_id)
                     if download_success:
                         self.progress_data[thread_id]['status'] = "Done"
-            
+                    elif was_cancelled:
+                        self.progress_data[thread_id]['status'] = "Cancelled"
+
             return download_success
 
-        # --- CASE 2: DIRECT DOWNLOAD (LIGHT FILES) ---
+        # ─────────────────────────────────────────────────────────────────────
+        # CASE 2: DIRECT DOWNLOAD (light files)
+        # ─────────────────────────────────────────────────────────────────────
         else:
+            if self.cancel_event.is_set(): _mark_cancelled(); return False
+
             download_url = self.api.get_download_url(share_id, file_data['id'], pass_token)
-            if not download_url: self.progress_data[thread_id]['status'] = "No URL"; return False
-            
+            if not download_url:
+                self.progress_data[thread_id]['status'] = "No URL"; return False
+
             if Config.USE_IDM and os.name == 'nt':
-                 if self.call_idm(download_url, name, save_dir):
-                    self.progress_data[thread_id].update({'percent': 100, 'status': Language.get('status_idm'), 'done_bytes': real_total_size})
+                if self.call_idm(download_url, name, save_dir):
+                    self.progress_data[thread_id].update(
+                        {'percent': 100, 'status': Language.get('status_idm'),
+                         'done_bytes': real_total_size})
                     return True
 
             try:
-                if file_path.exists() and file_path.stat().st_size == real_total_size: self.progress_data[thread_id].update({'percent': 100, 'status': "Skipped"}); return True
+                if (file_path.exists()
+                        and file_path.stat().st_size == real_total_size):
+                    self.progress_data[thread_id].update(
+                        {'percent': 100, 'status': "Skipped"})
+                    return True
+
                 resume_pos = 0; mode = 'wb'
                 if temp_file.exists():
                     resume_pos = temp_file.stat().st_size
-                    if resume_pos < real_total_size: mode = 'ab'; headers['Range'] = f"bytes={resume_pos}-"; self.progress_data[thread_id]['status'] = "Resuming..."
-                    elif resume_pos >= real_total_size: temp_file.rename(file_path); self.progress_data[thread_id].update({'percent': 100, 'status': "Done"}); return True
+                    if resume_pos < real_total_size:
+                        mode = 'ab'
+                        headers['Range'] = f"bytes={resume_pos}-"
+                        self.progress_data[thread_id]['status'] = "Resuming..."
+                    elif resume_pos >= real_total_size:
+                        temp_file.rename(file_path)
+                        self.progress_data[thread_id].update(
+                            {'percent': 100, 'status': "Done"})
+                        return True
 
-                r = requests.get(download_url, headers=headers, stream=True, timeout=Config.TIMEOUT, verify=False, proxies=Config.get_proxy_dict())
-                if resume_pos > 0 and r.status_code == 200: resume_pos = 0; mode = 'wb'; temp_file.unlink(missing_ok=True)
-                if r.status_code not in [200, 206]: 
+                r = requests.get(download_url, headers=headers, stream=True,
+                                 timeout=Config.TIMEOUT, verify=False,
+                                 proxies=Config.get_proxy_dict())
+                if resume_pos > 0 and r.status_code == 200:
+                    resume_pos = 0; mode = 'wb'; temp_file.unlink(missing_ok=True)
+                if r.status_code not in [200, 206]:
                     if temp_file.exists(): temp_file.unlink()
                     if file_path.exists(): file_path.unlink()
-                    self.progress_data[thread_id]['status'] = f"Err {r.status_code}"; return False
-                
-                done = resume_pos; start_time = time.time(); last_time = start_time; last_done = done
+                    self.progress_data[thread_id]['status'] = f"Err {r.status_code}"
+                    return False
+
+                done       = resume_pos
+                start_time = time.time()
+                last_time  = start_time
+                last_done  = done
                 with open(temp_file, mode) as f:
-                    for chunk in r.iter_content(chunk_size=1024*64):
+                    for chunk in r.iter_content(chunk_size=1024 * 64):
+                        if self.cancel_event.is_set():
+                            _cancel_and_cleanup_local(); return False
                         if chunk:
                             f.write(chunk); done += len(chunk)
                             if time.time() - last_time >= 0.5:
-                                speed = (done - last_done) / (time.time() - last_time); percent = (done / real_total_size) * 100 if real_total_size else 0
-                                eta = (real_total_size - done) / speed if speed > 0 else 0
-                                self.progress_data[thread_id].update({'percent': percent, 'speed': speed, 'status': "DL Direct", 'done_bytes': done, 'eta': eta}); last_time = time.time(); last_done = done
-                if temp_file.stat().st_size >= real_total_size: temp_file.rename(file_path); self.progress_data[thread_id].update({'percent': 100, 'status': "Done"}); return True
+                                speed   = (done - last_done) / (time.time() - last_time)
+                                percent = (done / real_total_size * 100) if real_total_size else 0
+                                eta     = ((real_total_size - done) / speed) if speed > 0 else 0
+                                self.progress_data[thread_id].update(
+                                    {'percent': percent, 'speed': speed,
+                                     'status': "DL Direct", 'done_bytes': done, 'eta': eta})
+                                last_time = time.time(); last_done = done
+
+                if temp_file.stat().st_size >= real_total_size:
+                    temp_file.rename(file_path)
+                    self.progress_data[thread_id].update({'percent': 100, 'status': "Done"})
+                    return True
                 return False
-            except: 
+            except:
                 if temp_file.exists(): temp_file.unlink()
                 if file_path.exists(): file_path.unlink()
-                self.progress_data[thread_id]['status'] = "Error"; return False
+                self.progress_data[thread_id]['status'] = "Error"
+                return False

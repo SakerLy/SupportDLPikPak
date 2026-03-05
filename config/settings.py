@@ -6,7 +6,6 @@ import urllib3
 from pathlib import Path
 from rich.console import Console
 
-# Tắt cảnh báo bảo mật SSL gây rác màn hình
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 APP_VERSION = "0.0.2"
@@ -15,15 +14,12 @@ GITHUB_ZIP_URL = "https://github.com/SakerLy/SupportDLPikPak/archive/refs/heads/
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/SakerLy/SupportDLPikPak/refs/heads/main/config/settings.py"
 GITHUB_RELEASE_URL = "https://github.com/SakerLy/SupportDLPikPak/releases"
 
-# Xác định đường dẫn gốc
 IS_FROZEN = getattr(sys, 'frozen', False)
 if IS_FROZEN:
     BASE_DIR = Path(sys.executable).parent
 else:
-    # Lấy thư mục cha của thư mục config
     BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Console toàn cục
 console = Console()
 
 class Language:
@@ -142,7 +138,7 @@ class Language:
             "cache_size": "Dung lượng",
             "cache_clear": "Xóa toàn bộ cache?",
             "cache_cleared": "✓ Đã dọn dẹp cache!",
-            "input_link": "Nhập PikPak Link",
+            "input_link": "Nhập Link PikPak",
             "input_pwd": "Mật khẩu (nếu có)",
             "analyzing": "➜ Đang phân tích cấu trúc thư mục...",
             "link_invalid": "✖ URL không hợp lệ!",
@@ -182,7 +178,6 @@ class Language:
         return cls.STRINGS.get(lang, cls.STRINGS["en"]).get(key, cls.STRINGS["en"].get(key, key))
 
 class Config:
-    # Gán biến toàn cục BASE_DIR vào class attribute để truy cập qua Config.BASE_DIR
     BASE_DIR = BASE_DIR 
     CONFIG_FILE = BASE_DIR / "config.json"
     
