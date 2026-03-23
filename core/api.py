@@ -22,17 +22,17 @@ class PikPakLogin:
         code, data, raw = HttpClient.request("POST", f"{self.USER_API}/v1/shield/captcha/init", headers=headers, json_data=payload)
         return data.get("captcha_token", "")
     def login(self):
-        captcha_token = self._captcha_init(); 
+        captcha_token = self._captcha_init()
         if not captcha_token: return None
         form_data = {"client_id": self.CLIENT_ID, "client_secret": self.CLIENT_SECRET, "username": self.username, "password": self.password, "captcha_token": captcha_token}
         headers = {"Content-Type": "application/x-www-form-urlencoded", "User-Agent": self._build_user_agent(), "X-Device-Id": self.device_id, "X-Captcha-Token": captcha_token}
-        
         try:
-            resp = requests.post(f"{self.USER_API}/v1/auth/signin", data=form_data, headers=headers, timeout=20, verify=False, proxies=Config.get_proxy_dict())
+            resp = requests.post(f"{self.USER_API}/v1/auth/signin", data=form_data, headers=headers, timeout=20, verify=False)
             data = resp.json()
             if "refresh_token" not in data: return None
             return {"access_token": data["access_token"], "refresh_token": data["refresh_token"], "user_id": data.get("sub", ""), "device_id": self.device_id}
         except: return None
+
 
 class PikPakAPI:
     BASE_URL = "https://api-drive.mypikpak.com"
@@ -47,13 +47,13 @@ class PikPakAPI:
         if not Config.REFRESH_TOKEN:
             console.print(f"[bold red]{Language.get('token_missing')}[/]")
             return False
-        
+
         ua = f"ANDROID-com.pikcloud.pikpak/1.47.1 protocolVersion/200 accesstype/ clientid/YNxT9w7GMdWvEOKa clientversion/1.47.1 action_type/ networktype/WIFI sessionid/ deviceid/{Config.DEVICE_ID} providername/NONE refresh_token/ sdkversion/2.0.4.204000 datetime/{int(time.time()*1000)} usrno/ appname/com.pikcloud.pikpak session_origin/ grant_type/ appid/ clientip/ devicename/Xiaomi osversion/13 platformversion/10 accessmode/ devicemodel/M2004J7AC"
         headers = {"User-Agent": ua, "X-Device-Id": Config.DEVICE_ID, "Content-Type": "application/x-www-form-urlencoded"}
         form = {"client_id": PikPakLogin.CLIENT_ID, "client_secret": PikPakLogin.CLIENT_SECRET, "grant_type": "refresh_token", "refresh_token": Config.REFRESH_TOKEN}
-        
+
         try:
-            resp = requests.post(f"{self.AUTH_URL}/v1/auth/token", data=form, headers=headers, timeout=15, verify=False, proxies=Config.get_proxy_dict())
+            resp = requests.post(f"{self.AUTH_URL}/v1/auth/token", data=form, headers=headers, timeout=15, verify=False)
             data = resp.json()
             if "access_token" not in data: return False
             self.access_token = data["access_token"]
@@ -75,7 +75,7 @@ class PikPakAPI:
                 all_files.extend(data.get("files", []))
                 next_token = data.get("next_page_token")
                 if not next_token: break
-        pass_token = data.get("pass_code_token", "")
+        pass_token = data.get("pass_code_token", "") if data else ""
         if Config.USE_CACHE and all_files: CacheManager.set("share_info", {'files': all_files, 'pass_code_token': pass_token}, share_id, password, duration=1800)
         return all_files, pass_token
 
@@ -106,71 +106,260 @@ class PikPakAPI:
             if m.get("link", {}).get("url"): return m["link"]["url"]
         return None
 
+    def get_root_folder_id(self) -> str:
+        """
+        Lấy ID thư mục root trong drive.
+        PikPak yêu cầu to_parent_id phải là ID thực khi restore.
+
+        Thử 3 cách theo thứ tự:
+          1. Query files với parent_id="root" → lấy parent_id từ file trả về
+          2. Query /about → quota.root_id
+          3. Fallback: string "root" (PikPak hầu hết version chấp nhận)
+        """
+        # Cách 1: lấy từ file bất kỳ trong root
+        code, data, _ = HttpClient.request(
+            "GET", f"{self.BASE_URL}/drive/v1/files",
+            headers=self.headers,
+            params={"parent_id": "root", "limit": "1", "with_audit": "false"}
+        )
+        if data:
+            files = data.get("files", [])
+            if files and files[0].get("parent_id"):
+                return files[0]["parent_id"]
+
+        # Cách 2: /about endpoint
+        code2, data2, _ = HttpClient.request(
+            "GET", f"{self.BASE_URL}/drive/v1/about",
+            headers=self.headers
+        )
+        if data2:
+            root_id = (data2.get("quota", {}).get("root_id")
+                       or data2.get("drive", {}).get("root_id"))
+            if root_id:
+                return root_id
+
+        # Cách 3: "root" literal — nhiều version PikPak API chấp nhận
+        return "root"
+
     def restore_and_poll(self, share_id, file_id, pass_token):
+        """
+        Restore file từ share vào drive của mình.
+        Trả về file_id mới trong drive, hoặc None nếu fail.
+
+        Các cách parse response được thử theo thứ tự:
+          1. trace_file_ids map  (file_id gốc → file_id mới)
+          2. file_ids list trong task params
+          3. file_id trực tiếp trong params
+          4. created_file_ids trong task root
+        """
+        # Lấy root folder ID — to_parent_id rỗng có thể bị server reject
+        root_id = self.get_root_folder_id()
+
         payload = {
-            "share_id": share_id,
+            "share_id":        share_id,
             "pass_code_token": pass_token,
-            "file_ids": [file_id], 
-            "to_parent_id": "",    
-            "params": {"trace_file_ids": file_id} 
+            "file_ids":        [file_id],
+            "to_parent_id":    root_id,          # phải là ID thực, không để rỗng
+            "params":          {"trace_file_ids": file_id},
         }
-        code, data, raw_text = HttpClient.request("POST", f"{self.BASE_URL}/drive/v1/share/restore", headers=self.headers, json_data=payload)
-        
-        if code != 200 or not data or "restore_task_id" not in data:
+        code, data, raw_text = HttpClient.request(
+            "POST", f"{self.BASE_URL}/drive/v1/share/restore",
+            headers=self.headers, json_data=payload
+        )
+
+        if code != 200 or not data:
             return None
-            
-        task_id = data["restore_task_id"]
-        max_retries = 30
-        for _ in range(max_retries):
-            time.sleep(1.5)
-            code, tdata, _ = HttpClient.request("GET", f"{self.BASE_URL}/drive/v1/tasks/{task_id}", headers=self.headers)
-            if code == 200 and tdata:
-                phase = tdata.get("phase")
-                if phase == "PHASE_TYPE_COMPLETE":
-                    try:
-                        params_obj = tdata.get("params", {})
-                        trace_str = params_obj.get("trace_file_ids", "{}")
-                        if isinstance(trace_str, str): trace_map = json.loads(trace_str)
-                        else: trace_map = trace_str
-                        new_file_id = trace_map.get(file_id)
-                        if new_file_id: return new_file_id
-                    except: return None
-                elif phase == "PHASE_TYPE_ERROR": return None
+
+        task_id = data.get("restore_task_id") or data.get("task_id")
+        if not task_id:
+            return None
+
+        # Poll task — tối đa 60 lần × 2s = 120 giây
+        for attempt in range(60):
+            time.sleep(2)
+            code, tdata, _ = HttpClient.request(
+                "GET", f"{self.BASE_URL}/drive/v1/tasks/{task_id}",
+                headers=self.headers
+            )
+            if code != 200 or not tdata:
+                continue
+
+            phase = tdata.get("phase", "")
+
+            if phase == "PHASE_TYPE_ERROR":
+                return None
+
+            if phase == "PHASE_TYPE_COMPLETE":
+                new_id = self._parse_new_file_id(tdata, file_id)
+                return new_id   # có thể None nếu parse fail → caller dùng fallback
+
+            # Vẫn đang chạy — tiếp tục poll
+
+        return None  # timeout
+
+    def _parse_new_file_id(self, task_data: dict, original_file_id: str):
+        """
+        Thử nhiều cách để lấy file_id mới sau khi restore hoàn thành.
+        Trả về str nếu tìm được, None nếu không.
+        """
+        params_obj = task_data.get("params", {})
+
+        # Cách 1: trace_file_ids là JSON string hoặc dict
+        trace = params_obj.get("trace_file_ids")
+        if trace:
+            try:
+                if isinstance(trace, str):
+                    trace_map = json.loads(trace)
+                else:
+                    trace_map = trace
+                if isinstance(trace_map, dict):
+                    new_id = trace_map.get(original_file_id)
+                    if new_id:
+                        return new_id
+            except Exception:
+                pass
+
+        # Cách 2: file_ids list trong params
+        file_ids = params_obj.get("file_ids")
+        if file_ids:
+            try:
+                if isinstance(file_ids, str):
+                    ids = json.loads(file_ids)
+                else:
+                    ids = file_ids
+                if isinstance(ids, list) and ids:
+                    return ids[0]
+            except Exception:
+                pass
+
+        # Cách 3: file_id trực tiếp trong params
+        direct = params_obj.get("file_id")
+        if direct:
+            return direct
+
+        # Cách 4: created_file_ids trong task root
+        created = task_data.get("created_file_ids")
+        if created and isinstance(created, list) and created:
+            return created[0]
+
         return None
 
-    def wait_for_file(self, filename, max_retries=20):
-        for _ in range(max_retries):
-            time.sleep(2.0) 
+    def wait_for_file(self, filename: str, max_retries: int = 20):
+        """
+        Poll danh sách file trong drive cho đến khi tìm thấy `filename`.
+        Dùng 2 cách query song song để tăng khả năng tìm thấy:
+          - filter by name (có thể lag index)
+          - list recent files và so tên (luôn hoạt động)
+        """
+        for attempt in range(max_retries):
+            time.sleep(2)
+
+            # Cách 1: filter by name
+            filters = json.dumps({
+                "name":    {"eq": filename},
+                "trashed": {"eq": False},
+            })
             params = {
                 "thumbnail_size": "SIZE_MEDIUM",
-                "limit": 10,
-                "with_audit": "true",
-                "filters": f'{{"name":{{"eq":"{filename}"}},"trashed":{{"eq":false}}}}',
-                "order_by": "modified_time",
-                "sort": "desc"
+                "limit":          20,
+                "with_audit":     "true",
+                "filters":        filters,
+                "order_by":       "modified_time",
+                "sort":           "desc",
             }
-            code, data, _ = HttpClient.request("GET", f"{self.BASE_URL}/drive/v1/files", headers=self.headers, params=params)
-            if data and "files" in data and len(data["files"]) > 0:
-                return data["files"][0]["id"]
+            code, data, _ = HttpClient.request(
+                "GET", f"{self.BASE_URL}/drive/v1/files",
+                headers=self.headers, params=params
+            )
+            if data and data.get("files"):
+                for f in data["files"]:
+                    if f.get("name") == filename and not f.get("trashed", False):
+                        return f["id"]
+
+            # Cách 2: list recent files (không dùng filter) và tìm theo tên
+            # — bỏ qua cách 1 lag index
+            params2 = {
+                "thumbnail_size": "SIZE_MEDIUM",
+                "limit":          50,
+                "with_audit":     "true",
+                "order_by":       "modified_time",
+                "sort":           "desc",
+            }
+            code2, data2, _ = HttpClient.request(
+                "GET", f"{self.BASE_URL}/drive/v1/files",
+                headers=self.headers, params=params2
+            )
+            if data2 and data2.get("files"):
+                for f in data2["files"]:
+                    if f.get("name") == filename and not f.get("trashed", False):
+                        return f["id"]
+
         return None
 
-    def get_user_file_url(self, file_id):
-        for _ in range(5): 
-            code, data, _ = HttpClient.request("GET", f"{self.BASE_URL}/drive/v1/files/{file_id}", headers=self.headers, params={"usage": "FETCH"})
+    def get_user_file_url(self, file_id: str):
+        """Lấy download URL của file trong drive."""
+        for attempt in range(5):
+            code, data, _ = HttpClient.request(
+                "GET", f"{self.BASE_URL}/drive/v1/files/{file_id}",
+                headers=self.headers, params={"usage": "FETCH"}
+            )
             if data:
                 if data.get("web_content_link"): return data["web_content_link"]
-                if data.get("download_url"): return data["download_url"]
+                if data.get("download_url"):     return data["download_url"]
                 medias = data.get("medias", [])
-                if medias and len(medias) > 0:
-                     if medias[0].get("link", {}).get("url"): 
-                         return medias[0]["link"]["url"]
+                if medias:
+                    url = medias[0].get("link", {}).get("url")
+                    if url: return url
             time.sleep(1)
         return None
-    
-    def delete_file(self, file_id):
-        url = f"{self.BASE_URL}/drive/v1/files:batchDelete"
+
+
+        # Cách 1: links["application/octet-stream"].url — URL đầy đủ nhất
+        links = data.get("links", {})
+        octet = links.get("application/octet-stream", {})
+        url = octet.get("url")
+        if url:
+            return url
+
+        # Cách 2: web_content_link — URL có token, không cần header
+        url = data.get("web_content_link")
+        if url:
+            return url
+
+        # Cách 3: download_url
+        url = data.get("download_url")
+        if url:
+            return url
+
+        return None
+
+
+        info = data.get("file_info", {})
+
+        # Ưu tiên links["application/octet-stream"]
+        links = info.get("links", {})
+        octet = links.get("application/octet-stream", {})
+        url = octet.get("url")
+        if url:
+            return url
+
+        # Fallback
+        url = info.get("web_content_link") or info.get("download_url")
+        if url:
+            return url
+
+        for m in info.get("medias", []):
+            u = m.get("link", {}).get("url")
+            if u:
+                return u
+
+        return None
+
+    def delete_file(self, file_id: str):
+        url     = f"{self.BASE_URL}/drive/v1/files:batchDelete"
         payload = {"ids": [file_id]}
         HttpClient.request("POST", url, headers=self.headers, json_data=payload)
+
 
 class TreeBuilder:
     def __init__(self, api): self.api = api

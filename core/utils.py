@@ -19,10 +19,10 @@ class CacheManager:
     else: CACHE_DIR = BASE_DIR / ".cache"
     CACHE_DURATION = 3600
     @classmethod
-    def init(cls): 
+    def init(cls):
         try: cls.CACHE_DIR.mkdir(exist_ok=True)
         except: pass
-        
+
     @classmethod
     def _get_cache_key(cls, *args): return hashlib.md5("_".join(str(arg) for arg in args).encode()).hexdigest()
     @classmethod
@@ -41,40 +41,67 @@ class CacheManager:
         cache_file = cls.CACHE_DIR / f"{key}.json"
         if duration is None: duration = cls.CACHE_DURATION
         try:
-            with open(cache_file, 'w', encoding='utf-8') as f: json.dump({'data': data, 'expire_time': (datetime.now() + timedelta(seconds=duration)).isoformat(), 'created_at': datetime.now().isoformat()}, f)
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump({'data': data, 'expire_time': (datetime.now() + timedelta(seconds=duration)).isoformat(), 'created_at': datetime.now().isoformat()}, f)
             return True
         except: return False
     @classmethod
     def clear_all(cls):
-        try: 
+        try:
             for f in cls.CACHE_DIR.glob("*.json"): f.unlink()
             return True
         except: return False
     @classmethod
     def get_cache_size(cls):
         t = 0; c = 0
-        try: 
+        try:
             for f in cls.CACHE_DIR.glob("*.json"): t += f.stat().st_size; c += 1
             return t, c
         except: return 0, 0
 
+
 class HttpClient:
+    """
+    HTTP client dùng cho PikPak API calls (login, share info, restore, poll...).
+    
+    use_proxy=False (mặc định): KHÔNG dùng proxy — API calls đi thẳng.
+    use_proxy=True: dùng proxy — chỉ truyền khi download file thực sự.
+    
+    Lý do: proxy chỉ cần thiết để bypass throttle khi download,
+    không nên áp dụng cho authentication và API calls vì:
+    - Tăng latency không cần thiết
+    - Một số proxy block non-HTTP traffic hoặc HTTPS CONNECT
+    - Token/session gắn với IP → đổi IP giữa auth và API call có thể bị reject
+    """
     @staticmethod
-    def request(method, url, headers=None, params=None, json_data=None):
+    def request(method, url, headers=None, params=None, json_data=None,
+                use_proxy: bool = False):
         try:
-            proxies = Config.get_proxy_dict()
-            response = requests.request(method, url, headers=headers, params=params, json=json_data, proxies=proxies, timeout=(10, Config.TIMEOUT), verify=False)
-            try: return response.status_code, response.json(), response.text
-            except: return response.status_code, None, response.text
-        except Exception as e: return 0, None, str(e)
+            proxies = Config.get_proxy_dict() if use_proxy else None
+            response = requests.request(
+                method, url,
+                headers=headers,
+                params=params,
+                json=json_data,
+                proxies=proxies,
+                timeout=(10, Config.TIMEOUT),
+                verify=False
+            )
+            try:
+                return response.status_code, response.json(), response.text
+            except:
+                return response.status_code, None, response.text
+        except Exception as e:
+            return 0, None, str(e)
+
 
 class UpdateManager:
     API_URL = "https://api.github.com/repos/SakerLy/SupportDLPikPak/releases/latest"
-    
+
     @staticmethod
     def check_for_updates():
-        if "raw.githubusercontent.com" not in GITHUB_VERSION_URL: return 
-        
+        if "raw.githubusercontent.com" not in GITHUB_VERSION_URL: return
+
         found_update = False
         latest_tag = ""
         html_url = ""
@@ -88,14 +115,14 @@ class UpdateManager:
                 latest_tag = data.get("tag_name", "0.0.0").lstrip("v")
                 html_url = data.get("html_url", GITHUB_RELEASE_URL)
                 body = data.get("body", "No description")
-                
+
                 if UpdateManager.is_newer_version(latest_tag, APP_VERSION):
                     found_update = True
         except: pass
 
         if found_update:
             console.print(Panel(f"[bold yellow]{Language.get('update_found')}: v{latest_tag}[/]\n[dim]Current: {APP_VERSION}[/]\n\n[white]{body}[/]", title="UPDATE", border_style="green"))
-            time.sleep(0.5) 
+            time.sleep(0.5)
             try:
                 if IS_FROZEN:
                     if Confirm.ask(Language.get('update_ask_web')): webbrowser.open(html_url)
@@ -110,15 +137,13 @@ class UpdateManager:
             l = [int(x) for x in local.split('.')]
             return r > l
         except: return False
+
     @staticmethod
     def perform_full_zip_update():
-        """Tải toàn bộ source code ZIP, giải nén và ghi đè"""
         temp_zip = BASE_DIR / "update_temp.zip"
         extract_path = BASE_DIR / "update_temp_folder"
-        
         try:
             with console.status("[bold green]Downloading full update package...", spinner="arrow3"):
-                # 1. Tải ZIP
                 r = requests.get(GITHUB_ZIP_URL, stream=True, timeout=30)
                 if r.status_code != 200: raise Exception("Download failed")
                 with open(temp_zip, 'wb') as f:
@@ -126,15 +151,13 @@ class UpdateManager:
                         f.write(chunk)
 
             with console.status("[bold blue]Extracting and applying files...", spinner="dots"):
-                # 2. Giải nén
                 with zipfile.ZipFile(temp_zip, 'r') as zip_ref:
                     zip_ref.extractall(extract_path)
-                
+
                 subfolders = [f for f in extract_path.iterdir() if f.is_dir()]
                 if not subfolders: raise Exception("Invalid ZIP structure")
                 source_folder = subfolders[0]
 
-                # 3. Ghi đè từng thành phần
                 for item in source_folder.iterdir():
                     dest_item = BASE_DIR / item.name
                     if item.is_dir():
@@ -144,13 +167,11 @@ class UpdateManager:
                         shutil.copy2(item, dest_item)
 
             console.print(f"[bold green]{Language.get('update_done')}[/]")
-            
-            # 4. Dọn dẹp
+
             if temp_zip.exists(): temp_zip.unlink()
             if extract_path.exists(): shutil.rmtree(extract_path)
-            
+
             time.sleep(2)
-            # Khởi động lại
             os.execv(sys.executable, ['python'] + sys.argv)
 
         except Exception as e:
