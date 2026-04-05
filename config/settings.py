@@ -2,6 +2,7 @@ import sys
 import json
 import uuid
 import os
+import logging
 import urllib3
 from pathlib import Path
 from rich.console import Console
@@ -18,6 +19,7 @@ IS_FROZEN = getattr(sys, 'frozen', False)
 BASE_DIR  = Path(sys.executable).parent if IS_FROZEN else Path(__file__).resolve().parent.parent
 
 console = Console()
+logger = logging.getLogger("PikPakTool")
 
 
 class Language:
@@ -206,6 +208,8 @@ class Language:
 class Config:
     BASE_DIR    = BASE_DIR
     CONFIG_FILE = BASE_DIR / "config.json"
+    LOG_DIR     = BASE_DIR / "logs"
+    LOG_FILE    = LOG_DIR / "pikpak_tool.log"
 
     # Auth
     REFRESH_TOKEN = ""; DEVICE_ID = ""; CAPTCHA_TOKEN = ""; LANGUAGE = "en"
@@ -273,16 +277,9 @@ class Config:
     @classmethod
     def test_proxy(cls) -> tuple:
         """
-        Kiểm tra proxy theo 2 bước:
-          1. Test HTTP  (http://example.com)
-          2. Test HTTPS (https://api.ipify.org) — bắt buộc vì PikPak dùng HTTPS
-
-        Trả về (ok: bool, msg: str).
-
-        Lý do proxy list hay fail:
-          - HTTP proxy chỉ forward HTTP, không tunnel HTTPS (lỗi ProxyError / SSLError)
-          - Proxy đã chết hoặc timeout
-          - Cần xác thực user/pass nhưng bỏ trống
+        Kiểm tra proxy có hoạt động không.
+        Hỗ trợ: http, https, socks4, socks5.
+        Trả về (bool, message).
         """
         proxy = cls.get_proxy_dict()
         if not proxy:
@@ -290,34 +287,46 @@ class Config:
 
         import requests as _req, urllib3
         urllib3.disable_warnings()
-        kw = dict(proxies=proxy, timeout=10, verify=False, trust_env=False)
 
-        # Bước 1: HTTP
+        # Dùng Session để set proxies đúng cách
+        session = _req.Session()
+        session.proxies.update(proxy)
+        session.verify = False
+
+        proxy_type = cls.PROXY_TYPE.lower()
+        is_socks    = proxy_type in ("socks4", "socks5")
+
+        # Bước 1: kết nối cơ bản
         try:
-            _req.get("http://www.gstatic.com/generate_204", **kw)
+            test_url = "http://api.ipify.org" if is_socks else "http://www.gstatic.com/generate_204"
+            session.get(test_url, timeout=10)
         except Exception as e:
+            session.close()
             err = str(e)
             if "407" in err or "Proxy Authentication" in err:
-                return False, "Proxy yêu cầu xác thực — hãy nhập Username/Password"
-            return False, f"HTTP fail: {e}"
+                return False, "Proxy yêu cầu xác thực — kiểm tra Username/Password"
+            if "No module" in err and "socks" in err.lower():
+                return False, "Thiếu thư viện: pip install requests[socks]"
+            if "SOCKS" in err or "socks" in err.lower():
+                return False, f"SOCKS lỗi — kiểm tra loại proxy ({proxy_type})"
+            return False, f"Kết nối thất bại: {e}"
 
-        # Bước 2: HTTPS — quan trọng hơn vì PikPak API dùng HTTPS
+        # Bước 2: HTTPS (PikPak dùng HTTPS nên bắt buộc phải pass)
         try:
-            r = _req.get("https://api.ipify.org?format=json", **kw)
+            r  = session.get("https://api.ipify.org?format=json", timeout=10)
             ip = r.json().get("ip", "?")
-            return True, f"✓ HTTPS OK — IP proxy: {ip}"
+            session.close()
+            return True, f"OK — IP qua proxy: {ip}"
         except Exception as e:
+            session.close()
             err = str(e)
             if "SSLError" in err or "CONNECT" in err or "tunnel" in err.lower():
-                return False, (
-                    "HTTP proxy không hỗ trợ HTTPS tunnel\n"
-                    "  → Thử đổi loại sang [bold]socks5[/] hoặc dùng proxy HTTPS"
-                )
+                return False, "Proxy không hỗ trợ HTTPS tunnel — thử đổi sang socks5"
             if "407" in err or "Proxy Authentication" in err:
-                return False, "Proxy yêu cầu xác thực — hãy nhập Username/Password"
-            if "Timeout" in err or "timed out" in err.lower():
-                return False, "Proxy timeout — proxy có thể đã chết"
-            return False, f"HTTPS fail: {e}"
+                return False, "Proxy yêu cầu xác thực — kiểm tra Username/Password"
+            if "timed out" in err.lower() or "Timeout" in err:
+                return False, "Proxy timeout — proxy quá chậm hoặc đã chết"
+            return False, f"HTTPS thất bại: {e}"
 
     @classmethod
     def load_config(cls):
@@ -386,8 +395,8 @@ class Config:
         """
         if not cls.CONFIG_FILE.exists():
             return
-        cls.load_config()  
-        cls.save_config() 
+        cls.load_config() 
+        cls.save_config()  
 
     @classmethod
     def setup_dirs(cls):

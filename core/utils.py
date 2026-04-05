@@ -1,3 +1,5 @@
+import aiohttp
+import asyncio
 import requests
 import json
 import hashlib
@@ -13,6 +15,7 @@ from rich.panel import Panel
 from rich.prompt import Confirm
 
 from config.settings import Config, console, Language, APP_VERSION, GITHUB_ZIP_URL, GITHUB_VERSION_URL, GITHUB_RELEASE_URL, IS_FROZEN, BASE_DIR
+from core.logger import logger
 
 class CacheManager:
     if IS_FROZEN: CACHE_DIR = BASE_DIR / ".cache"
@@ -74,24 +77,30 @@ class HttpClient:
     - Token/session gắn với IP → đổi IP giữa auth và API call có thể bị reject
     """
     @staticmethod
-    def request(method, url, headers=None, params=None, json_data=None,
-                use_proxy: bool = False):
+    async def request(method, url, headers=None, params=None, json_data=None,
+                      use_proxy: bool = False):
+        logger.debug("HTTP request %s %s use_proxy=%s", method, url, use_proxy)
         try:
+            connector = aiohttp.TCPConnector(verify_ssl=False)
             proxies = Config.get_proxy_dict() if use_proxy else None
-            response = requests.request(
-                method, url,
-                headers=headers,
-                params=params,
-                json=json_data,
-                proxies=proxies,
-                timeout=(10, Config.TIMEOUT),
-                verify=False
-            )
-            try:
-                return response.status_code, response.json(), response.text
-            except:
-                return response.status_code, None, response.text
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.request(
+                    method, url,
+                    headers=headers,
+                    params=params,
+                    json=json_data,
+                    proxy=proxies.get('http') if proxies else None,
+                    timeout=aiohttp.ClientTimeout(total=Config.TIMEOUT, connect=10)
+                ) as response:
+                    try:
+                        data = await response.json()
+                        text = await response.text()
+                        return response.status, data, text
+                    except:
+                        text = await response.text()
+                        return response.status, None, text
         except Exception as e:
+            logger.exception("HTTP request failed %s %s", method, url)
             return 0, None, str(e)
 
 

@@ -1,6 +1,7 @@
 import sys
 import time
 import threading
+import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.live import Live
 from rich.panel import Panel
@@ -72,7 +73,7 @@ class Menu:
         UpdateManager.check_for_updates()
         # Load account pool ngay khi khởi động
         Config.load_config()
-        n = reload_pool()
+        n = asyncio.run(reload_pool())
         if n > 1:
             console.print(f"  [bold green]✓ Account pool: {n} accounts active (~{n*11} MB/s max)[/]")
             time.sleep(1)
@@ -123,7 +124,7 @@ class Menu:
         api = PikPakLogin(username, password, Config.DEVICE_ID)
         try:
             with console.status(f"[bold cyan]  {Language.get('login_wait')}", spinner="dots"):
-                result = api.login()
+                result = asyncio.run(api.login())
         except:
             result = None
         if not result:
@@ -473,7 +474,7 @@ class Menu:
         api = PikPakLogin(username, password, device_id)
         try:
             with console.status(f"[bold cyan]  {Language.get('login_wait')}", spinner="dots"):
-                result = api.login()
+                result = asyncio.run(api.login())
         except:
             result = None
 
@@ -488,7 +489,7 @@ class Menu:
         Config.save_config()
 
         # Reload pool ngay
-        n = reload_pool()
+        n = asyncio.run(reload_pool())
         console.print(f"\n  [bold green]{Language.get('acc_added')}[/]")
         console.print(f"  [green]Pool now: {n} accounts (~{n*11} MB/s max)[/]")
         time.sleep(2)
@@ -511,14 +512,14 @@ class Menu:
 
         Config.EXTRA_ACCOUNTS.pop(idx)
         Config.save_config()
-        reload_pool()
+        asyncio.run(reload_pool())
         console.print(f"  [bold green]{Language.get('acc_removed')}[/]")
         time.sleep(1)
 
     def _test_accounts(self):
         self.print_header()
         console.print(f"[bold cyan]  {Language.get('acc_test')}[/]\n")
-        n = reload_pool(verbose=True)
+        n = asyncio.run(reload_pool(verbose=True))
         console.print(f"\n  [bold green]Active: {n} / {1 + len(Config.EXTRA_ACCOUNTS)} accounts[/]")
         console.print(f"  [bold green]Estimated max speed: ~{n * 11} MB/s[/]")
         Prompt.ask("\n  [dim]Enter to continue...[/]")
@@ -557,7 +558,7 @@ class Menu:
 
         for url in url_list:
             console.print(f"  [bold cyan]➜ Analyzing:[/] {url}")
-            data = self.downloader.get_tree_and_prepare(url, pwd)
+            data = asyncio.run(self.downloader.get_tree_and_prepare(url, pwd))
             if not data:
                 console.print(f"  [bold red]✖ Skipped (failed to load)[/]")
                 continue
@@ -624,29 +625,28 @@ class Menu:
         if not master_files:
             return
 
-        # Gom file theo link, tải tuần tự
-        from collections import defaultdict
-        groups = defaultdict(list)
+        download_items = []
         for f in master_files:
-            groups[f["_link_idx"]].append(f)
+            tree_data = all_link_data[f["_link_idx"]]["tree"]
+            f["_share_id"] = tree_data["share_id"]
+            f["_pass_token"] = tree_data["pass_token"]
+            download_items.append(f)
 
-        for link_idx, selected_files in groups.items():
-            tree_data = all_link_data[link_idx]["tree"]
-            # Đảm bảo pool luôn fresh trước khi tải
-            reload_pool()
-            console.print(
-                f"\n[bold yellow]⬇ Downloading {len(selected_files)} file(s) "
-                f"from link {link_idx + 1}/{len(all_link_data)}[/]"
-            )
-            cancelled = self.run_download_with_retry(selected_files, tree_data)
-            if cancelled:
-                console.print("\n[bold red]⛔ Cancelled – remaining links skipped.[/]")
-                time.sleep(2)
-                break
+        # Đảm bảo pool luôn fresh trước khi tải
+        asyncio.run(reload_pool())
+        link_count = len({f["_link_idx"] for f in download_items})
+        console.print(
+            f"\n[bold yellow]⬇ Downloading {len(download_items)} file(s) "
+            f"from {link_count} link(s) concurrently[/]"
+        )
+        cancelled = self.run_download_with_retry(download_items)
+        if cancelled:
+            console.print("\n[bold red]⛔ Cancelled – remaining files skipped.[/]")
+            time.sleep(2)
 
     # ── Core download loop with cancel ────────────────────────────────────────
 
-    def run_download_with_retry(self, files, tree_data) -> bool:
+    def run_download_with_retry(self, files) -> bool:
         """
         Tải files với retry.
         - Trong khi tải: nhấn Q để cancel toàn bộ.
@@ -689,16 +689,21 @@ class Menu:
                 dash_thread = threading.Thread(target=update_dashboard, daemon=True)
                 dash_thread.start()
 
-                with ThreadPoolExecutor(max_workers=Config.MAX_WORKERS) as executor:
-                    futures = [
-                        executor.submit(
-                            self.downloader.download_single_file,
-                            f, tree_data['share_id'], tree_data['pass_token'], i + 1
-                        )
-                        for i, f in enumerate(files)
-                    ]
-                    for future in as_completed(futures):
-                        pass
+                async def download_files():
+                    pool = get_pool()
+                    apis = pool.all_apis() or [self.downloader.api]
+                    tasks = []
+                    for i, f in enumerate(files):
+                        api_for_file = apis[i % len(apis)]
+                        tasks.append(asyncio.create_task(
+                            self.downloader.download_single_file(
+                                f, f['_share_id'], f['_pass_token'], i + 1,
+                                api=api_for_file
+                            )
+                        ))
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+                asyncio.run(download_files())
 
                 self.downloader.stop_monitor()
                 dash_thread.join(timeout=1)

@@ -5,3 +5,4 @@ downloads
 *.pyc
 *.pyo
 *.pyd
+logs

@@ -1,30 +1,30 @@
 import threading
 import time
-from typing import Optional, List
-from config.settings import Config, console, Language
+import asyncio
+from typing import Optional, List, Dict
+
+from config.settings import Config, console
 from core.api import PikPakAPI
+from core.logger import logger
 
 
 class _AccountSlot:
-    """1 slot = 1 account PikPak đã refresh token."""
     def __init__(self, refresh_token: str, device_id: str, index: int):
         self.index         = index
         self.refresh_token = refresh_token
         self.device_id     = device_id
         self.api: Optional[PikPakAPI] = None
         self.ready         = False
-        self.in_use        = False
         self.error         = ""
 
-    def authenticate(self) -> bool:
-        """Tạo PikPakAPI mới và refresh token."""
+    async def authenticate(self) -> bool:
         try:
             api = PikPakAPI()
-            orig_token    = Config.REFRESH_TOKEN
-            orig_device   = Config.DEVICE_ID
+            orig_token  = Config.REFRESH_TOKEN
+            orig_device = Config.DEVICE_ID
             Config.REFRESH_TOKEN = self.refresh_token
             Config.DEVICE_ID     = self.device_id
-            ok = api.refresh_token()
+            ok = await api.refresh_token()
             Config.REFRESH_TOKEN = orig_token
             Config.DEVICE_ID     = orig_device
             if ok:
@@ -38,98 +38,104 @@ class _AccountSlot:
         except Exception as e:
             self.ready = False
             self.error = str(e)
+            logger.exception("Account authentication failed for slot %s", self.index)
             return False
 
 
 class AccountPool:
     """
-    Thread-safe pool quản lý nhiều PikPak account.
-    Cấp phát account theo round-robin, tự fallback về account chính nếu pool trống.
+    Thread-safe pool.
+    Chính sách: TẤT CẢ account cùng tải 1 file (stripe segments).
     """
 
     def __init__(self):
         self._slots:  List[_AccountSlot] = []
         self._lock    = threading.Lock()
-        self._rr_idx  = 0   # round-robin index
+        self._rr_idx  = 0
 
-    # ── Load / reload ─────────────────────────────────────────────────────────
+    # ── Load ──────────────────────────────────────────────────────────────────
 
-    def load(self, verbose: bool = False) -> int:
-        """
-        Đọc danh sách account từ Config.EXTRA_ACCOUNTS + account chính.
-        Trả về số slot khả dụng.
-        """
+    async def load(self, verbose: bool = False) -> int:
         slots = []
 
-        # Account chính luôn ở slot 0
         if Config.REFRESH_TOKEN:
             slot = _AccountSlot(Config.REFRESH_TOKEN, Config.DEVICE_ID, 0)
-            ok   = slot.authenticate()
+            ok   = await slot.authenticate()
             if verbose:
-                icon = "✓" if ok else "✖"
-                console.print(f"  [{('green' if ok else 'red')}]{icon} Account #0 (main)[/]")
+                console.print(f"  [{'green' if ok else 'red'}]{'✓' if ok else '✖'} Account #0 (main)[/]")
             slots.append(slot)
 
-        # Extra accounts
         for i, acc in enumerate(Config.EXTRA_ACCOUNTS, start=1):
-            rt = acc.get("refresh_token", "")
+            rt  = acc.get("refresh_token", "")
             did = acc.get("device_id", "")
             if not rt:
                 continue
             slot = _AccountSlot(rt, did, i)
-            ok   = slot.authenticate()
+            ok   = await slot.authenticate()
             if verbose:
-                icon = "✓" if ok else "✖"
-                console.print(f"  [{('green' if ok else 'red')}]{icon} Account #{i}[/]")
+                console.print(f"  [{'green' if ok else 'red'}]{'✓' if ok else '✖'} Account #{i}[/]")
             slots.append(slot)
 
         with self._lock:
             self._slots  = slots
             self._rr_idx = 0
 
-        ready = sum(1 for s in slots if s.ready)
-        return ready
+        ready_count = sum(1 for s in slots if s.ready)
+        logger.info("Account pool loaded: %s ready slots", ready_count)
+        return ready_count
 
-    # ── Acquire / release ─────────────────────────────────────────────────────
-
-    def acquire(self) -> Optional[PikPakAPI]:
-        """
-        Trả về PikPakAPI của slot tiếp theo sẵn sàng (round-robin).
-        Nếu tất cả đều bận hoặc lỗi, trả về API của slot đầu tiên sẵn (blocking wait).
-        """
-        with self._lock:
-            if not self._slots:
-                return None
-
-            ready = [s for s in self._slots if s.ready]
-            if not ready:
-                return None
-
-            # Round-robin qua các slot sẵn sàng
-            idx        = self._rr_idx % len(ready)
-            slot       = ready[idx]
-            self._rr_idx = (self._rr_idx + 1) % len(ready)
-            return slot.api
+    # ── Queries ───────────────────────────────────────────────────────────────
 
     def size(self) -> int:
-        """Số slot khả dụng."""
         with self._lock:
             return sum(1 for s in self._slots if s.ready)
 
     def all_apis(self) -> List[PikPakAPI]:
-        """Tất cả API sẵn sàng (dùng để Restore song song)."""
+        """Tất cả API sẵn sàng."""
         with self._lock:
             return [s.api for s in self._slots if s.ready and s.api]
 
-    def reauth_all(self) -> None:
-        """Re-authenticate tất cả slot (gọi khi token hết hạn)."""
+    def acquire(self) -> Optional[PikPakAPI]:
+        """Lấy 1 API theo round-robin (dùng cho Restore/Delete)."""
+        with self._lock:
+            ready = [s for s in self._slots if s.ready]
+            if not ready:
+                return None
+            idx = self._rr_idx % len(ready)
+            self._rr_idx = (self._rr_idx + 1) % len(ready)
+            return ready[idx].api
+
+    async def get_stripe_urls_async(self, get_url_fn_per_api) -> List[Optional[str]]:
+        """
+        Lấy download URL từ mỗi account song song (async).
+        get_url_fn_per_api(api) → str | None
+
+        Trả về list URL theo thứ tự slot:
+          [url_acc0, url_acc1, url_acc2, ...]
+        None nếu account đó không lấy được URL.
+        """
+        apis = self.all_apis()
+        if not apis:
+            return []
+
+        async def _fetch(api: PikPakAPI):
+            try:
+                url = await get_url_fn_per_api(api)
+            except Exception:
+                url = None
+            return url
+
+        tasks = [asyncio.create_task(_fetch(api)) for api in apis]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return [r if not isinstance(r, Exception) else None for r in results]
+
+    async def reauth_all(self) -> None:
         with self._lock:
             slots = list(self._slots)
         for slot in slots:
-            slot.authenticate()
+            await slot.authenticate()
 
     def status_lines(self) -> List[str]:
-        """Trả về list string mô tả trạng thái từng slot."""
         lines = []
         with self._lock:
             for s in self._slots:
@@ -141,14 +147,13 @@ class AccountPool:
         return lines
 
 
-# ── Module-level singleton ────────────────────────────────────────────────────
+# ── Singleton ─────────────────────────────────────────────────────────────────
 
 _pool_instance: Optional[AccountPool] = None
 _pool_lock     = threading.Lock()
 
 
 def get_pool() -> AccountPool:
-    """Singleton AccountPool — tạo 1 lần, dùng suốt session."""
     global _pool_instance
     with _pool_lock:
         if _pool_instance is None:
@@ -156,9 +161,8 @@ def get_pool() -> AccountPool:
     return _pool_instance
 
 
-def reload_pool(verbose: bool = False) -> int:
-    """Re-load pool từ Config hiện tại. Trả về số account khả dụng."""
+async def reload_pool(verbose: bool = False) -> int:
     global _pool_instance
     with _pool_lock:
         _pool_instance = AccountPool()
-    return _pool_instance.load(verbose=verbose)
+    return await _pool_instance.load(verbose=verbose)
