@@ -29,7 +29,7 @@ ASCII_LOGO = """
 [/]"""
 
 
-# ── Cross-platform non-blocking single-key read ───────────────────────────────
+# Cross-platform non-blocking single-key read
 def _read_key_nonblocking():
     """Return the next pressed key (lowercase) or None if nothing pending."""
     try:
@@ -67,8 +67,7 @@ class Menu:
         console.print(Align.center(ASCII_LOGO))
         console.print(Align.center(f"[bold white]VERSION {APP_VERSION}[/] | [dim]{Language.get('menu_dev')}[/]\n"))
 
-    # ── Main menu ─────────────────────────────────────────────────────────────
-
+    # Main menu
     def main_menu(self):
         UpdateManager.check_for_updates()
         # Load account pool ngay khi khởi động
@@ -113,8 +112,7 @@ class Menu:
             elif c == "6": self.extra_accounts_menu()
             elif c == "0": sys.exit()
 
-    # ── Auth ──────────────────────────────────────────────────────────────────
-
+    # Auth
     def login_with_password(self):
         self.print_header()
         console.print(f"[bold cyan]  {Language.get('login_header')}[/]\n")
@@ -137,8 +135,7 @@ class Menu:
         console.print(f"\n  [bold green]{Language.get('login_success')}[/]")
         time.sleep(2)
 
-    # ── Settings ──────────────────────────────────────────────────────────────
-
+    # Settings
     def settings_menu(self):
         while True:
             Config.load_config()
@@ -183,16 +180,14 @@ class Menu:
         elif c == "2": Config.LANGUAGE = "vi"; console.print("\n  [bold green]✓ Đã chuyển sang Tiếng Việt[/]")
         Config.save_config(); time.sleep(1)
 
-    # ── Quick cache toggle (gắn thẳng vào settings menu [6]) ────────────────
-
+    # Quick cache toggle
     def _toggle_cache_quick(self):
         Config.USE_CACHE = self._ask_toggle("Cache", Config.USE_CACHE)
         Config.save_config()
         console.print(f"  [bold green]✓ Đã lưu![/]  Cache: {self._badge(Config.USE_CACHE)}")
         time.sleep(1)
 
-    # ── Toggle helper ────────────────────────────────────────────────────────
-
+    # Toggle helper
     @staticmethod
     def _badge(enabled: bool) -> str:
         return "[bold green][ ON  ][/]" if enabled else "[bold red][ OFF ][/]"
@@ -208,10 +203,9 @@ class Menu:
         else:
             if Confirm.ask("  ➜ Bật lên?", default=False):
                 return True
-        return current   # giữ nguyên
+        return current
 
-    # ── Proxy ─────────────────────────────────────────────────────────────────
-
+    # Proxy
     def proxy_setup(self):
         while True:
             Config.load_config()
@@ -303,8 +297,7 @@ class Menu:
                     console.print("  [dim]3. Proxy HTTP free thường không tunnel được HTTPS[/]")
                 Prompt.ask("\n  Enter để tiếp tục...")
 
-    # ── Threads setup ────────────────────────────────────────────────────────
-
+    # Threads setup
     def threads_setup(self):
         import os as _os
         self.print_header()
@@ -329,8 +322,7 @@ class Menu:
         console.print(f"\n  [bold green]✓ Đã lưu![/]  Luồng: [cyan]{Config.CONCURRENT_THREADS}[/] conn  (~{Config.CONCURRENT_THREADS * 11} MB/s max)")
         time.sleep(1.5)
 
-    # ── Premium Mode ──────────────────────────────────────────────────────────
-
+    # Premium Mode
     def premium_mode_setup(self):
         self.print_header()
         console.print("\n  [bold cyan]━━  PREMIUM TRANSFER MODE  ━━[/]")
@@ -349,8 +341,7 @@ class Menu:
         console.print(f"\n  [bold green]✓ Đã lưu![/]  Premium Mode: {self._badge(Config.FORCE_PREMIUM_MODE)}")
         time.sleep(1.5)
 
-    # ── Advanced ──────────────────────────────────────────────────────────────
-
+    # Advanced Setup
     def advanced_setup(self):
         self.print_header()
         console.print("\n  [bold cyan]━━  CÀI ĐẶT NÂNG CAO  ━━[/]")
@@ -412,8 +403,7 @@ class Menu:
         console.print(Panel(grid, title=Language.get("menu_5"), border_style="blue", box=box.ROUNDED))
         Prompt.ask("\n  [dim]Enter...[/]")
 
-    # ── Extra accounts menu ───────────────────────────────────────────────────
-
+    # Extra accounts menu
     def extra_accounts_menu(self):
         while True:
             Config.load_config()
@@ -524,8 +514,7 @@ class Menu:
         console.print(f"  [bold green]Estimated max speed: ~{n * 11} MB/s[/]")
         Prompt.ask("\n  [dim]Enter to continue...[/]")
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
+    # Helpers
     def _collect_files(self, tree):
         res = []
         for item in tree:
@@ -535,8 +524,7 @@ class Menu:
                 res.extend(self._collect_files(item["folders"] + item["files"]))
         return res
 
-    # ── Download menu ─────────────────────────────────────────────────────────
-
+    # Download menu
     def download_menu(self):
         Config.load_config()
         self.print_header()
@@ -644,8 +632,7 @@ class Menu:
             console.print("\n[bold red]⛔ Cancelled – remaining files skipped.[/]")
             time.sleep(2)
 
-    # ── Core download loop with cancel ────────────────────────────────────────
-
+    # Core download loop with cancel
     def run_download_with_retry(self, files) -> bool:
         """
         Tải files với retry.
@@ -693,14 +680,29 @@ class Menu:
                     pool = get_pool()
                     apis = pool.all_apis() or [self.downloader.api]
                     tasks = []
+                    
+                    # Semaphore giới hạn đúng số luồng max workers
+                    semaphore = asyncio.Semaphore(Config.MAX_WORKERS)
+                    
+                    # Khởi tạo toàn bộ dữ liệu chờ (Waiting) trước khi chạy task thực tế
                     for i, f in enumerate(files):
-                        api_for_file = apis[i % len(apis)]
-                        tasks.append(asyncio.create_task(
-                            self.downloader.download_single_file(
+                        self.downloader.progress_data[i + 1] = {
+                            'id': i + 1, 'name': f['name'], 'percent': 0, 'speed': 0,
+                            'status': 'Waiting', 'done_bytes': 0,
+                            'total_bytes': int(f.get('size', 0)), 'eta': 0
+                        }
+
+                    async def sem_download(f, i, api_for_file):
+                        async with semaphore:
+                            return await self.downloader.download_single_file(
                                 f, f['_share_id'], f['_pass_token'], i + 1,
                                 api=api_for_file
                             )
-                        ))
+
+                    for i, f in enumerate(files):
+                        api_for_file = apis[i % len(apis)]
+                        tasks.append(asyncio.create_task(sem_download(f, i, api_for_file)))
+                        
                     await asyncio.gather(*tasks, return_exceptions=True)
 
                 asyncio.run(download_files())
@@ -710,7 +712,7 @@ class Menu:
 
             self.clear()
 
-            # ── Cancelled ────────────────────────────────────────────────────
+            # Cancelled
             if user_cancelled:
                 done_count = sum(
                     1 for i in range(len(files))
@@ -726,7 +728,7 @@ class Menu:
                 Prompt.ask("\n  [dim]Enter to continue...[/]")
                 return True
 
-            # ── Normal finish ─────────────────────────────────────────────────
+            # Normal finish
             done_count   = 0
             failed_files = []
             for i, f in enumerate(files):

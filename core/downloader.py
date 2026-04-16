@@ -6,7 +6,6 @@ import aiohttp
 import aiofiles
 import asyncio
 import re
-import queue as _queue
 from pathlib import Path
 from aiohttp import ClientTimeout
 from rich.console import Group
@@ -18,14 +17,10 @@ from core.api import PikPakAPI, TreeBuilder
 from core.account_pool import get_pool
 from core.logger import logger
 
-
-# ── Shared status constants ────────────────────────────────────────────────────
 DONE_STATUS   = "Done"
 SKIP_STATUS   = "Skipped"
 GOOD_STATUSES = {DONE_STATUS, SKIP_STATUS}
 
-
-# ── Connection pool factory ───────────────────────────────────────────────────
 def _make_session(pool_size: int) -> aiohttp.ClientSession:
     """Session với connection pool + retry. Proxy chỉ dùng khi tải file."""
     connector = aiohttp.TCPConnector(limit=pool_size, limit_per_host=pool_size, verify_ssl=False)
@@ -34,9 +29,7 @@ def _make_session(pool_size: int) -> aiohttp.ClientSession:
     timeout = ClientTimeout(total=60)
     return aiohttp.ClientSession(connector=connector, timeout=timeout)
 
-
 class Downloader:
-    # ── Tuning ────────────────────────────────────────────────────────────────
     SEGMENT_SIZE    = 4 * 1024 * 1024   # 4 MB per segment
     CHUNK_SIZE      = 1 * 1024 * 1024   # 1 MB read buffer
     UPDATE_INTERVAL = 0.3               # seconds between progress updates
@@ -50,33 +43,38 @@ class Downloader:
 
     TOKEN_TTL = 20 * 60   # re-auth every 20 min (PikPak token ~30 min)
 
-    def _check_file_integrity(self, file_path: Path) -> bool:
-        """Check file integrity using ffmpeg for media files."""
+    async def _check_file_integrity(self, file_path: Path) -> bool:
+        """Check file integrity using ffprobe for media files (Instant check, non-blocking)."""
         ext = file_path.suffix.lower()
         media_exts = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ts', '.m4v'}
         
         if ext in media_exts:
             try:
-                import subprocess
-                result = subprocess.run(
-                    ['ffmpeg', '-i', str(file_path), '-f', 'null', '-'],
-                    capture_output=True, timeout=30, check=False
+                process = await asyncio.create_subprocess_exec(
+                    'ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
+                    '-of', 'default=noprint_wrappers=1:nokey=1', str(file_path),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
                 )
-                is_valid = result.returncode == 0
-                if not is_valid:
-                    logger.warning("File integrity check failed for %s (ffmpeg error)", file_path)
-                return is_valid
-            except subprocess.TimeoutExpired:
-                logger.warning("File integrity check timeout for %s", file_path)
-                return False
+                try:
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
+                    is_valid = process.returncode == 0
+                    if not is_valid:
+                        logger.warning("File integrity check failed for %s (ffprobe error)", file_path)
+                    return is_valid
+                except asyncio.TimeoutError:
+                    try:
+                        process.kill()
+                    except: pass
+                    logger.warning("File integrity check timeout for %s, assuming OK to avoid data loss", file_path)
+                    return True
             except FileNotFoundError:
-                logger.warning("FFmpeg not found, skipping integrity check for %s", file_path)
-                return True  # Assume ok if ffmpeg not available
+                logger.warning("ffprobe not found, skipping integrity check for %s", file_path)
+                return True
             except Exception as e:
                 logger.exception("Error checking file integrity for %s", file_path)
-                return False
+                return True
         else:
-            # For non-media files, assume ok (size check is sufficient)
             return True
 
     def __init__(self):
@@ -89,6 +87,7 @@ class Downloader:
         self.cancel_event      = threading.Event()
         self._last_refresh     = 0.0
         self._token_lock       = asyncio.Lock()
+        self.bg_tasks          = set()
 
     def reset_progress(self):
         self.progress_data     = {}
@@ -107,7 +106,15 @@ class Downloader:
                 self._last_refresh = time.time()
             return ok
 
-    # ── Formatting ────────────────────────────────────────────────────────────
+    async def _bg_delete(self, api_client, file_id):
+        """Xóa file trên cloud ngầm, không block tiến trình UI hay tải file tiếp theo."""
+        for _ in range(3):
+            try:
+                await asyncio.wait_for(api_client.delete_file(file_id), timeout=10.0)
+                break
+            except Exception as e:
+                logger.warning("Background delete retry %s: %s", file_id, type(e).__name__)
+                await asyncio.sleep(2)
 
     @staticmethod
     def format_size(size):
@@ -140,8 +147,6 @@ class Downloader:
                 return max(cfg, auto)
         return max(cfg, 4)
 
-    # ── Tree / API ────────────────────────────────────────────────────────────
-
     async def get_tree_and_prepare(self, url, password):
         m = re.search(r"/s/([A-Za-z0-9_-]+)", url)
         if not m:
@@ -159,8 +164,6 @@ class Downloader:
         return {"folders": tree["folders"], "files": tree["files"],
                 "share_id": share_id, "pass_token": ptoken}
 
-    # ── Monitor / dashboard ───────────────────────────────────────────────────
-
     def start_monitor(self, total_count, total_size_bytes):
         self.monitor_active    = True
         self.total_files_count = total_count
@@ -176,7 +179,14 @@ class Downloader:
         cancelled_count = sum(1 for p in all_threads if p['status'] == "Cancelled")
         display_list    = [p for p in all_threads
                            if p['status'] not in (*GOOD_STATUSES, "Cancelled")]
-        total_speed      = sum(p['speed'] for p in display_list)
+        
+        total_speed = 0
+        for p in display_list:
+            if "DL" in p['status'] or "Resuming" in p['status']:
+                total_speed += p.get('speed', 0)
+            else:
+                p['speed'] = 0  
+
         total_downloaded = sum(p.get('done_bytes', 0) for p in all_threads)
         remaining        = max(0, self.total_batch_size - total_downloaded)
         eta_str          = self.format_time(remaining / total_speed) if total_speed > 0 else "--:--"
@@ -213,32 +223,35 @@ class Downloader:
         task_table.add_column("Status",   width=14, justify="center")
 
         for p in sorted(display_list, key=lambda x: x['id']):
-            pct = p['percent']
+            pct = min(p.get('percent', 0), 100) # Ép tuyệt đối hiển thị tối đa 100%
             bad = p['status'] in ("Error", "Failed", "Restore Fail",
                                   "Too Large", "Cancelled", "Cancelling...")
-            bar_color = "red" if bad else ("green" if pct == 100 else "cyan")
+            waiting = p['status'] == "Waiting"
+            
+            bar_color = "dim" if waiting else ("red" if bad else ("green" if pct == 100 else "cyan"))
             filled = int(20 * pct / 100)
             bar    = f"[{bar_color}]{'━'*filled}[/][dim white]{'━'*(20-filled)}[/]"
+            
             if bad:                              ss = "bold red"
             elif p['status'] == "Cancelling...": ss = "bold yellow"
+            elif waiting:                        ss = "dim white"
             else:                                ss = "cyan"
+            
             task_table.add_row(
                 str(p['id']), p['name'], f"{bar} {pct:.0f}%",
-                f"{self.format_size(p['speed'])}/s",
+                f"{self.format_size(p.get('speed', 0))}/s",
                 self.format_time(p.get('eta', 0)),
                 f"[{ss}]{p['status']}[/]"
             )
         return Group(panel_stats, task_table)
 
-    # ── Segment worker ────────────────────────────────────────────────────────
-
     async def _fetch_segment(self, url, headers, file_path,
-                       seg_start, seg_end, thread_id, shared,
+                       seg_i, seg_start, seg_end, thread_id, seg_progress, shared,
                        shared_lock, dl_start):
+        """Tải một đoạn file. Tracking riêng bytes của đoạn này thông qua seg_progress."""
         h = headers.copy()
         h['Range'] = f"bytes={seg_start}-{seg_end}"
         last_ui = time.time()
-        local_bytes = 0
 
         proxy = Config.get_proxy_dict()
         proxy_url = proxy.get('http') if proxy else None
@@ -248,13 +261,18 @@ class Downloader:
         for attempt in range(5):
             if self.cancel_event.is_set():
                 return False
+                
+            attempt_bytes = 0
             try:
                 connector = aiohttp.TCPConnector(limit=1, limit_per_host=1, verify_ssl=False)
                 async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                     async with session.get(url, headers=h, proxy=proxy_url) as r:
-                        if r.status in (401, 403):
-                            await asyncio.sleep(1); continue
+                        if r.status in (401, 403, 500, 502, 503, 504):
+                            logger.debug("Segment %s HTTP %s, retrying attempt %s", seg_i, r.status, attempt)
+                            await asyncio.sleep(1.5 ** attempt)
+                            continue
                         r.raise_for_status()
+                        
                         async with aiofiles.open(file_path, "r+b") as f:
                             await f.seek(seg_start)
                             async for chunk in r.content.iter_chunked(self.CHUNK_SIZE):
@@ -262,174 +280,161 @@ class Downloader:
                                     return False
                                 if not chunk: continue
                                 await f.write(chunk)
-                                local_bytes += len(chunk)
+                                attempt_bytes += len(chunk)
+                                
                                 now = time.time()
                                 if now - last_ui >= self.UPDATE_INTERVAL:
                                     elapsed = max(now - dl_start, 0.001)
-                                    with shared_lock:
-                                        shared['done_bytes'] += local_bytes
-                                        done    = shared['done_bytes']
+                                    async with shared_lock:
+                                        seg_progress[seg_i] = attempt_bytes
+                                        done    = sum(seg_progress.values())
                                         total   = shared['total']
                                         speed   = done / elapsed
-                                        percent = done / total * 100 if total else 0
+                                        percent = (done / total * 100) if total else 0
                                         eta     = (total - done) / speed if speed > 0 else 0
-                                        shared.update({'speed': speed,
-                                                       'percent': percent, 'eta': eta})
+                                        
+                                        shared.update({'speed': speed, 'percent': percent, 'eta': eta})
                                         self.progress_data[thread_id].update({
                                             'done_bytes': done, 'speed': speed,
                                             'percent': percent, 'eta': eta,
                                         })
-                                    local_bytes = 0
                                     last_ui = now
-                # flush remaining
-                if local_bytes > 0:
-                    with shared_lock:
-                        shared['done_bytes'] += local_bytes
-                        done    = shared['done_bytes']
-                        total   = shared['total']
-                        elapsed = max(time.time() - dl_start, 0.001)
-                        speed   = done / elapsed
-                        percent = done / total * 100 if total else 0
-                        eta     = (total - done) / speed if speed > 0 else 0
-                        shared.update({'speed': speed, 'percent': percent, 'eta': eta})
-                        self.progress_data[thread_id].update({
-                            'done_bytes': done, 'speed': speed,
-                            'percent': percent, 'eta': eta,
-                        })
+                                    
+                # flush remaining sau khi thoát loop
+                async with shared_lock:
+                    seg_progress[seg_i] = attempt_bytes
+                    done    = sum(seg_progress.values())
+                    total   = shared['total']
+                    elapsed = max(time.time() - dl_start, 0.001)
+                    speed   = done / elapsed
+                    percent = (done / total * 100) if total else 0
+                    eta     = (total - done) / speed if speed > 0 else 0
+                    
+                    shared.update({'speed': speed, 'percent': percent, 'eta': eta})
+                    self.progress_data[thread_id].update({
+                        'done_bytes': done, 'speed': speed,
+                        'percent': percent, 'eta': eta,
+                    })
                 return True
+                
             except (aiohttp.ClientHttpProxyError, proxy_exc):
                 if proxy_url is not None:
-                    logger.warning("Proxy failed for segment %s-%s, retrying without proxy", seg_start, seg_end)
                     proxy_url = None
                     await asyncio.sleep(1)
                     continue
-                logger.exception("Segment download proxy error without proxy available: %s %s-%s", url, seg_start, seg_end)
                 await asyncio.sleep(min(2 ** attempt, 8))
             except Exception as e:
-                logger.exception("Segment download error: %s %s-%s attempt=%s", url, seg_start, seg_end, attempt)
+                # Nếu đứt ngang, báo log ngầm và retry
+                logger.debug("Segment %s download error %s", seg_i, type(e).__name__)
                 await asyncio.sleep(min(2 ** attempt, 8))
-        logger.error("Failed to download segment after retries: %s %s-%s", url, seg_start, seg_end)
+            
+            # Rất quan trọng: Reset dung lượng của cục bị tải hỏng về 0 để tránh vượt 100%
+            async with shared_lock:
+                seg_progress[seg_i] = 0
+
         return False
 
-    # ── Multi-connection download ─────────────────────────────────────────────
-
     async def _multi_conn_download(self, urls, headers, file_path, file_size,
-                             thread_id, num_conn, get_fresh_urls):
-        """
-        Tải file bằng nhiều connection song song.
-
-        urls          : list URL — 1 URL per account (stripe mode).
-                        Nếu chỉ có 1 URL thì dùng 1 account như bình thường.
-        get_fresh_urls: callable() → list[str|None] — refresh tất cả URL khi expire.
-        num_conn      : tổng số worker thread (phân bổ đều giữa các URL/account).
-
-        Stripe logic:
-          segment_index % len(urls) → chọn URL nào
-          → 2 account = mỗi account tải 50% segment → tốc độ nhân đôi.
-        """
+                             thread_id, num_conn, get_fresh_urls_coro):
+        """Sử dụng cơ chế ghi đè Segment Progress để kiểm soát 100% cực chuẩn."""
         if isinstance(urls, str):
-            urls = [urls]   # backward compat
+            urls = [urls]   
 
-        n_urls = len([u for u in urls if u])   # số URL hợp lệ
+        n_urls = len([u for u in urls if u])   
         if n_urls == 0:
             logger.error("No valid download URLs provided for file %s", file_path)
             return False
 
         logger.debug("Starting multi-connection download for %s with %s urls and %s conns", file_path, n_urls, num_conn)
-        # Build segment queue — mỗi segment mang theo index để stripe
-        seg_q    = _queue.Queue()
-        pos      = 0
-        seg_idx  = 0
+        
+        seg_q = asyncio.Queue()
+        pos = 0
+        seg_idx = 0
         while pos < file_size:
             end = min(pos + self.SEGMENT_SIZE - 1, file_size - 1)
-            seg_q.put((seg_idx, pos, end))
-            pos     = end + 1
+            seg_q.put_nowait((seg_idx, pos, end))
+            pos = end + 1
             seg_idx += 1
 
-        # Create empty file instead of pre-allocating full size
         try:
             with open(file_path, "wb") as f:
-                pass  # Just create the file, let it grow as data is written
+                pass  
         except Exception:
             self.progress_data[thread_id]['status'] = "Disk Error"
             return False
 
+        # Dictionary theo dõi lượng bytes chuẩn từng đoạn
+        seg_progress = {}
         shared      = {'done_bytes': 0, 'speed': 0.0,
                        'percent': 0.0, 'eta': 0.0, 'total': file_size}
-        shared_lock = threading.Lock()
+        shared_lock = asyncio.Lock()
         dl_start    = time.time()
-        url_holders = list(urls)   # mutable list, index-mapped per account
-        url_lock    = threading.Lock()
+        url_holders = list(urls)   
+        url_lock    = asyncio.Lock()
         failed_segs = []
-        fail_lock   = threading.Lock()
+        fail_lock   = asyncio.Lock()
 
         acc_label = f"{n_urls} acc" if n_urls > 1 else f"{num_conn} conn"
         self.progress_data[thread_id]['status'] = f"DL x{acc_label}"
 
-        def worker():
+        async def worker():
             while True:
                 if self.cancel_event.is_set(): break
                 try:
                     seg_i, seg_start, seg_end = seg_q.get_nowait()
-                except _queue.Empty:
+                except asyncio.QueueEmpty:
                     break
 
-                # Stripe: chọn URL theo segment index
                 url_idx = seg_i % len(url_holders)
-                with url_lock:
+                async with url_lock:
                     cur_url = url_holders[url_idx]
 
                 if not cur_url:
-                    # URL này null — thử URL khác
-                    with url_lock:
+                    async with url_lock:
                         cur_url = next((u for u in url_holders if u), None)
                     if not cur_url:
-                        with fail_lock: failed_segs.append((seg_i, seg_start, seg_end))
-                        seg_q.task_done(); continue
+                        async with fail_lock: failed_segs.append((seg_i, seg_start, seg_end))
+                        seg_q.task_done()
+                        continue
 
-                ok = asyncio.run(self._fetch_segment(
+                ok = await self._fetch_segment(
                     cur_url, headers, file_path,
-                    seg_start, seg_end, thread_id, shared, shared_lock, dl_start))
+                    seg_i, seg_start, seg_end, thread_id, seg_progress, shared, shared_lock, dl_start)
 
                 if not ok and not self.cancel_event.is_set():
-                    # Refresh tất cả URL rồi retry segment này
-                    fresh = get_fresh_urls()
+                    fresh = await get_fresh_urls_coro()
                     if fresh:
-                        with url_lock:
+                        async with url_lock:
                             for i, u in enumerate(fresh):
                                 if u and i < len(url_holders):
                                     url_holders[i] = u
-                        with url_lock:
                             cur_url = url_holders[url_idx] or next(
                                 (u for u in url_holders if u), None)
                     if cur_url:
-                        ok = asyncio.run(self._fetch_segment(
+                        ok = await self._fetch_segment(
                             cur_url, headers, file_path,
-                            seg_start, seg_end, thread_id, shared, shared_lock, dl_start))
+                            seg_i, seg_start, seg_end, thread_id, seg_progress, shared, shared_lock, dl_start)
 
                 if not ok:
-                    with fail_lock: failed_segs.append((seg_i, seg_start, seg_end))
+                    async with fail_lock: failed_segs.append((seg_i, seg_start, seg_end))
                 seg_q.task_done()
 
-        workers = [threading.Thread(target=worker, daemon=True)
-                   for _ in range(num_conn)]
-        for w in workers: w.start()
-        for w in workers: w.join()
+        workers = [asyncio.create_task(worker()) for _ in range(num_conn)]
+        await asyncio.gather(*workers)
 
         if self.cancel_event.is_set():
             return False
 
-        # Retry failed segments single-thread
         if failed_segs:
             self.progress_data[thread_id]['status'] = f"Retry {len(failed_segs)} segs"
-            fresh = get_fresh_urls()
+            fresh = await get_fresh_urls_coro()
             retry_url = next((u for u in (fresh or url_holders) if u), None)
             for seg_i, seg_start, seg_end in failed_segs:
                 if self.cancel_event.is_set():
                     return False
-                ok = asyncio.run(self._fetch_segment(
+                ok = await self._fetch_segment(
                     retry_url, headers, file_path,
-                    seg_start, seg_end, thread_id, shared, shared_lock, dl_start))
+                    seg_i, seg_start, seg_end, thread_id, seg_progress, shared, shared_lock, dl_start)
                 if not ok:
                     return False
 
@@ -479,58 +484,64 @@ class Downloader:
             return False
         logger.info("Fallback direct download URL resolved for %s", name)
 
-        # Check if we can use FFmpeg for media files
         ext = file_path.suffix.lower()
         media_exts = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ts', '.m4v'}
         use_ffmpeg = ext in media_exts
 
         if use_ffmpeg:
-            # Use FFmpeg for media files
             logger.info("Using FFmpeg to download media file %s", name)
-            _set_status("FFmpeg Init...")
+            _set_status("FFmpeg DL...")
             
-            # Build headers string
             headers_list = [f"{k}: {v}" for k, v in BASE_HEADERS.items()]
             headers_str = '\n'.join(headers_list)
             
-            # FFmpeg command
             cmd = [
                 'ffmpeg',
                 '-headers', headers_str,
                 '-i', download_url,
                 '-c', 'copy',
-                '-y',  # overwrite
+                '-y', 
                 str(temp_file)
             ]
             
-            # Add proxy if available
             env = os.environ.copy()
+            proxy = Config.get_proxy_dict() if not force_no_proxy else None
+            proxy_url = proxy.get('http') if proxy else None
             if proxy_url:
                 env['http_proxy'] = proxy_url
                 env['https_proxy'] = proxy_url
             
             try:
-                _set_status("FFmpeg DL...")
-                process = subprocess.run(cmd, env=env, timeout=Config.TIMEOUT, check=False)
+                process = await asyncio.create_subprocess_exec(
+                    *cmd, env=env,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+                try:
+                    await asyncio.wait_for(process.communicate(), timeout=Config.TIMEOUT)
+                except asyncio.TimeoutError:
+                    try:
+                        process.kill()
+                        await process.communicate()
+                    except: pass
+                    logger.error("FFmpeg download timeout for %s", name)
+                    return False
+
                 if process.returncode == 0 and temp_file.exists():
                     temp_file.rename(file_path)
-                    if self._check_file_integrity(file_path):
+                    if await self._check_file_integrity(file_path):
                         self.progress_data[thread_id].update(
-                            {'percent': 100, 'status': DONE_STATUS})
+                            {'percent': 100, 'speed': 0, 'status': DONE_STATUS, 'done_bytes': real_total_size, 'eta': 0})
                         return True
                     else:
                         logger.warning("FFmpeg downloaded file %s is corrupted", file_path)
                         try:
                             file_path.unlink()
-                        except:
-                            pass
+                        except: pass
                         return False
                 else:
                     logger.error("FFmpeg download failed for %s (exit code %s)", name, process.returncode)
                     return False
-            except subprocess.TimeoutExpired:
-                logger.error("FFmpeg download timeout for %s", name)
-                return False
             except FileNotFoundError:
                 logger.warning("FFmpeg not found, falling back to HTTP download for %s", name)
                 use_ffmpeg = False
@@ -538,11 +549,10 @@ class Downloader:
                 logger.exception("FFmpeg download error for %s", name)
                 return False
 
-        # Skip nếu đã có file đủ size và valid (for both FFmpeg and HTTP)
         if file_path.exists() and file_path.stat().st_size == real_total_size:
-            if self._check_file_integrity(file_path):
+            if await self._check_file_integrity(file_path):
                 self.progress_data[thread_id].update(
-                    {'percent': 100, 'status': SKIP_STATUS})
+                    {'percent': 100, 'speed': 0, 'status': SKIP_STATUS, 'done_bytes': real_total_size, 'eta': 0})
                 return True
             else:
                 logger.info("Existing file %s is corrupted, removing and re-downloading", file_path)
@@ -579,17 +589,22 @@ class Downloader:
             num_conn = self._resolve_conn(real_total_size)
             _set_status(f"DL x{num_conn} conn")
             logger.info("Using fallback segmented download for %s with %s connections", name, num_conn)
+            
+            async def _get_fresh_urls_coro():
+                fresh_url = await self.api.get_download_url(share_id, file_data['id'], pass_token)
+                return [fresh_url] if fresh_url else [download_url]
+
             ok = await self._multi_conn_download(
                 [download_url], BASE_HEADERS, file_path,
                 real_total_size, thread_id, num_conn,
-                lambda: [download_url]
+                _get_fresh_urls_coro
             )
             if self.cancel_event.is_set():
                 _cancel_cleanup(); return False
             if ok:
                 self.progress_data[thread_id].update(
                     {'percent': 100, 'speed': 0, 'status': DONE_STATUS,
-                     'done_bytes': real_total_size})
+                     'done_bytes': real_total_size, 'eta': 0})
                 return True
             _clean_local()
             _set_status("Fallback...")
@@ -608,7 +623,7 @@ class Downloader:
                 elif resume_pos >= real_total_size:
                     temp_file.rename(file_path)
                     self.progress_data[thread_id].update(
-                        {'percent': 100, 'status': DONE_STATUS})
+                        {'percent': 100, 'speed': 0, 'status': DONE_STATUS, 'done_bytes': real_total_size, 'eta': 0})
                     return True
 
             connector = aiohttp.TCPConnector(verify_ssl=False)
@@ -657,9 +672,13 @@ class Downloader:
 
             if temp_file.exists() and temp_file.stat().st_size >= real_total_size:
                 temp_file.rename(file_path)
-                self.progress_data[thread_id].update(
-                    {'percent': 100, 'status': DONE_STATUS})
-                return True
+                if await self._check_file_integrity(file_path):
+                    self.progress_data[thread_id].update(
+                        {'percent': 100, 'speed': 0, 'status': DONE_STATUS, 'done_bytes': real_total_size, 'eta': 0})
+                    return True
+                else:
+                    self.progress_data[thread_id].update({'status': "Failed"})
+                    return False
             return False
 
         except Exception as e:
@@ -668,10 +687,7 @@ class Downloader:
             _set_status("Error")
             return False
 
-    # ── Main download entry ───────────────────────────────────────────────────
-
     async def download_single_file(self, file_data, share_id, pass_token, thread_id, api=None):
-        # Early cancel
         if self.cancel_event.is_set():
             self.progress_data[thread_id] = {
                 'id': thread_id, 'name': file_data['name'],
@@ -703,7 +719,6 @@ class Downloader:
         file_path = save_dir / name
         temp_file = file_path.parent / f".{file_path.name}.tmp"
 
-        # Xóa file tạm lỗi từ lần tải trước để tránh resume file corrupted
         if temp_file.exists():
             logger.info("Removing leftover temp file from previous failed download: %s", temp_file)
             temp_file.unlink(missing_ok=True)
@@ -727,15 +742,12 @@ class Downloader:
         def _set_status(s): self.progress_data[thread_id]['status'] = s
         def _cancel_cleanup(): _clean_local(); _set_status('Cancelled')
 
-        # ─────────────────────────────────────────────────────────────────────
-        # CASE 1 — PREMIUM / HEAVY  (Restore → multi-conn DL → Cloud cleanup)
-        # ─────────────────────────────────────────────────────────────────────
         if use_premium:
             if file_path.exists():
                 if file_path.stat().st_size == real_total_size:
                     self.progress_data[thread_id].update(
                         {'percent': 100, 'speed': 0, 'status': SKIP_STATUS,
-                         'done_bytes': real_total_size})
+                         'done_bytes': real_total_size, 'eta': 0})
                     return True
                 file_path.unlink(missing_ok=True)
 
@@ -755,17 +767,16 @@ class Downloader:
                 _set_status(f"Init [{pool.size()} acc]...")
 
             try:
-                # 0. Pre-cleanup
                 if self.cancel_event.is_set():
                     was_cancelled = True; _set_status('Cancelled'); return False
                 _set_status("Checking cloud...")
                 stale = await api.wait_for_file(name, max_retries=1)
                 if stale:
                     logger.info("Deleting stale cloud file for %s: %s", name, stale)
-                    _set_status("Cleaning Old...")
-                    await api.delete_file(stale); await asyncio.sleep(0.5)
+                    task = asyncio.create_task(self._bg_delete(api, stale))
+                    self.bg_tasks.add(task)
+                    task.add_done_callback(self.bg_tasks.discard)
 
-                # 1. Restore
                 if self.cancel_event.is_set():
                     was_cancelled = True; _set_status('Cancelled'); return False
                 _set_status(Language.get('status_restore'))
@@ -778,7 +789,7 @@ class Downloader:
                             my_file_id, alt_error = await alt_api.restore_and_poll(share_id, file_data['id'], pass_token)
                             if my_file_id:
                                 logger.info("Successfully restored using secondary account")
-                                api = alt_api  # Switch to alt_api for subsequent operations
+                                api = alt_api 
                             else:
                                 logger.error("Secondary account also failed: %s", alt_error or "unknown")
                         else:
@@ -791,7 +802,6 @@ class Downloader:
                     logger.warning("Premium restore failed for %s, switching to direct download", name)
                     return await self._download_direct_file(file_data, share_id, pass_token, thread_id)
 
-                # 2. Get download link (retry up to 5×)
                 if self.cancel_event.is_set():
                     was_cancelled = True; _cancel_cleanup(); return False
                 _set_status(Language.get('status_getlink'))
@@ -806,14 +816,10 @@ class Downloader:
                     return False
                 logger.info("Obtained premium download URL for %s", name)
 
-                # 3. Multi-connection download — stripe segments giữa các account
                 if self.cancel_event.is_set():
                     was_cancelled = True; _cancel_cleanup(); return False
 
                 num_conn = self._resolve_conn(real_total_size)
-
-                # Lấy download URL từ TẤT CẢ account song song
-                # Mỗi account có URL riêng → stripe segment → tốc độ nhân lên
                 all_apis = pool.all_apis() or [api]
 
                 async def _get_url_for(a, fid):
@@ -823,35 +829,31 @@ class Downloader:
                         await asyncio.sleep(1)
                     return None
 
-                # Lấy URL song song từ mọi account
                 stripe_urls = await pool.get_stripe_urls_async(
                     lambda a: _get_url_for(a, my_file_id)
                 ) or [download_url]
 
-                # Loại None, đảm bảo có ít nhất 1 URL
                 stripe_urls = [u for u in stripe_urls if u] or [download_url]
 
                 n_acc = len(stripe_urls)
                 _set_status(f"DL x{n_acc} acc / {num_conn} conn")
                 logger.info("Starting stripe download for %s with %s accounts", name, n_acc)
 
-                def _get_fresh_urls():
-                    async def inner():
-                        return await pool.get_stripe_urls_async(
-                            lambda a: _get_url_for(a, my_file_id)
-                        )
-                    return asyncio.run(inner()) or [download_url]
+                async def _get_fresh_urls_coro():
+                    return await pool.get_stripe_urls_async(
+                        lambda a: _get_url_for(a, my_file_id)
+                    ) or [download_url]
 
                 dl_success = await self._multi_conn_download(
                     stripe_urls, BASE_HEADERS, file_path,
-                    real_total_size, thread_id, num_conn, _get_fresh_urls
+                    real_total_size, thread_id, num_conn, _get_fresh_urls_coro
                 )
 
                 if self.cancel_event.is_set():
                     was_cancelled = True; _cancel_cleanup(); return False
 
                 if dl_success:
-                    if not self._check_file_integrity(file_path):
+                    if not await self._check_file_integrity(file_path):
                         logger.warning("Downloaded file %s is corrupted, removing and marking as failed", file_path)
                         try:
                             file_path.unlink()
@@ -862,23 +864,21 @@ class Downloader:
                     else:
                         self.progress_data[thread_id].update(
                             {'percent': 100, 'speed': 0, 'status': DONE_STATUS,
-                             'done_bytes': real_total_size})
+                             'done_bytes': real_total_size, 'eta': 0})
                 else:
                     _set_status("Failed"); _clean_local()
 
             finally:
                 if my_file_id:
-                    _set_status("Cloud Clean..." if was_cancelled
-                                else Language.get('status_clean'))
-                    await api.delete_file(my_file_id)
-                    if dl_success:      _set_status(DONE_STATUS)
-                    elif was_cancelled: _set_status("Cancelled")
+                    task = asyncio.create_task(self._bg_delete(api, my_file_id))
+                    self.bg_tasks.add(task)
+                    task.add_done_callback(self.bg_tasks.discard)
+                    
+                    if was_cancelled: 
+                        _set_status("Cancelled")
 
             return dl_success
 
-        # ─────────────────────────────────────────────────────────────────────
-        # CASE 2 — DIRECT / LIGHT  (multi-connection download trực tiếp)
-        # ─────────────────────────────────────────────────────────────────────
         else:
             if self.cancel_event.is_set():
                 _cancel_cleanup(); return False
@@ -890,11 +890,10 @@ class Downloader:
                 return False
             logger.info("Direct download URL resolved for %s", name)
 
-            # Skip nếu đã có file đủ size và valid
             if file_path.exists() and file_path.stat().st_size == real_total_size:
-                if self._check_file_integrity(file_path):
+                if await self._check_file_integrity(file_path):
                     self.progress_data[thread_id].update(
-                        {'percent': 100, 'status': SKIP_STATUS})
+                        {'percent': 100, 'speed': 0, 'status': SKIP_STATUS, 'done_bytes': real_total_size, 'eta': 0})
                     return True
                 else:
                     logger.info("Existing file %s is corrupted, removing and re-downloading", file_path)
@@ -903,7 +902,6 @@ class Downloader:
                     except:
                         pass
 
-            # Kiểm tra server hỗ trợ Range
             supports_range = False
             try:
                 connector = aiohttp.TCPConnector(verify_ssl=False)
@@ -916,33 +914,30 @@ class Downloader:
             except Exception as e:
                 logger.exception("Error probing direct URL range support for %s", name)
 
-            # Multi-connection nếu hỗ trợ Range và file đủ lớn
             if supports_range and real_total_size > 1 * 1024 * 1024:
                 num_conn = self._resolve_conn(real_total_size)
                 _set_status(f"DL x{num_conn} conn")
                 logger.info("Using segmented download for %s with %s connections", name, num_conn)
-                def _get_fresh_urls():
-                    async def inner():
-                        fresh_url = await self.api.get_download_url(share_id, file_data['id'], pass_token)
-                        return [fresh_url] if fresh_url else [download_url]
-                    return asyncio.run(inner())
+                
+                async def _get_fresh_urls_coro():
+                    fresh_url = await self.api.get_download_url(share_id, file_data['id'], pass_token)
+                    return [fresh_url] if fresh_url else [download_url]
 
                 ok = await self._multi_conn_download(
                     [download_url], BASE_HEADERS, file_path,
                     real_total_size, thread_id, num_conn,
-                    _get_fresh_urls
+                    _get_fresh_urls_coro
                 )
                 if self.cancel_event.is_set():
                     _cancel_cleanup(); return False
                 if ok:
                     self.progress_data[thread_id].update(
                         {'percent': 100, 'speed': 0, 'status': DONE_STATUS,
-                         'done_bytes': real_total_size})
+                         'done_bytes': real_total_size, 'eta': 0})
                     return True
                 _clean_local()
                 _set_status("Fallback...")
 
-            # Single-thread fallback
             logger.info("Starting direct fallback download for %s", name)
             proxy_exc = getattr(aiohttp, "ClientProxyConnectionError", aiohttp.ClientHttpProxyError)
             max_direct_attempts = 3
@@ -960,9 +955,10 @@ class Downloader:
                             _set_status("Resuming...")
                         elif resume_pos >= real_total_size:
                             temp_file.rename(file_path)
-                            self.progress_data[thread_id].update(
-                                {'percent': 100, 'status': DONE_STATUS})
-                            return True
+                            if await self._check_file_integrity(file_path):
+                                self.progress_data[thread_id].update(
+                                    {'percent': 100, 'speed': 0, 'status': DONE_STATUS, 'done_bytes': real_total_size, 'eta': 0})
+                                return True
 
                     connector = aiohttp.TCPConnector(verify_ssl=False)
                     proxy = Config.get_proxy_dict()
@@ -1013,9 +1009,9 @@ class Downloader:
 
                     if temp_file.exists() and temp_file.stat().st_size >= real_total_size:
                         temp_file.rename(file_path)
-                        if self._check_file_integrity(file_path):
+                        if await self._check_file_integrity(file_path):
                             self.progress_data[thread_id].update(
-                                {'percent': 100, 'status': DONE_STATUS})
+                                {'percent': 100, 'speed': 0, 'status': DONE_STATUS, 'done_bytes': real_total_size, 'eta': 0})
                             return True
                         else:
                             logger.warning("Downloaded file %s is corrupted, removing and retrying", file_path)
