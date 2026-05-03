@@ -2,27 +2,20 @@ import os
 import sys
 import subprocess
 import time
-
 from core.logger import init_logger, logger
 
 def install_requirements():
-    if getattr(sys, 'frozen', False):
-        return
-
+    if getattr(sys, 'frozen', False): return
     required = ["aiohttp", "aiofiles", "requests", "rich"]
     missing = []
-
     for lib in required:
-        try:
-            __import__(lib)
-        except ImportError:
-            missing.append(lib)
+        try: __import__(lib)
+        except ImportError: missing.append(lib)
 
     if missing:
         print("="*60)
         print(" INSTALLING MISSING LIBRARIES...")
         print("="*60)
-
         for lib in missing:
             print(f"⏳ Installing: {lib}...")
             try:
@@ -31,7 +24,6 @@ def install_requirements():
             except subprocess.CalledProcessError:
                 print(f"✖ Failed to install: {lib}. Please install manually.")
                 sys.exit(1)
-
         print("-" * 60)
         print("✓ Done. Starting Tool...")
         time.sleep(1)
@@ -40,7 +32,6 @@ def main():
     install_requirements()
     init_logger()
     logger.info("Starting PikPak Downloader")
-
     try:
         from config.settings import Config
         from core.utils import CacheManager
@@ -50,7 +41,6 @@ def main():
         CacheManager.init()
         Config.setup_dirs()
         Config.migrate_config()
-
         Menu().main_menu()
     except ImportError as e:
         logger.exception("Failed to import modules")

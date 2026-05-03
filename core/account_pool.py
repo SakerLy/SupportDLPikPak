@@ -1,12 +1,9 @@
 import threading
-import time
 import asyncio
-from typing import Optional, List, Dict
-
+from typing import Optional, List
 from config.settings import Config, console
 from core.api import PikPakAPI
 from core.logger import logger
-
 
 class _AccountSlot:
     def __init__(self, refresh_token: str, device_id: str, index: int):
@@ -38,26 +35,17 @@ class _AccountSlot:
         except Exception as e:
             self.ready = False
             self.error = str(e)
-            logger.exception("Account authentication failed for slot %s", self.index)
+            logger.exception("Account auth failed for slot %s", self.index)
             return False
 
-
 class AccountPool:
-    """
-    Thread-safe pool.
-    Chính sách: TẤT CẢ account cùng tải 1 file (stripe segments).
-    """
-
     def __init__(self):
         self._slots:  List[_AccountSlot] = []
         self._lock    = threading.Lock()
         self._rr_idx  = 0
 
-    # ── Load ──────────────────────────────────────────────────────────────────
-
     async def load(self, verbose: bool = False) -> int:
         slots = []
-
         if Config.REFRESH_TOKEN:
             slot = _AccountSlot(Config.REFRESH_TOKEN, Config.DEVICE_ID, 0)
             ok   = await slot.authenticate()
@@ -68,8 +56,7 @@ class AccountPool:
         for i, acc in enumerate(Config.EXTRA_ACCOUNTS, start=1):
             rt  = acc.get("refresh_token", "")
             did = acc.get("device_id", "")
-            if not rt:
-                continue
+            if not rt: continue
             slot = _AccountSlot(rt, did, i)
             ok   = await slot.authenticate()
             if verbose:
@@ -80,60 +67,34 @@ class AccountPool:
             self._slots  = slots
             self._rr_idx = 0
 
-        ready_count = sum(1 for s in slots if s.ready)
-        logger.info("Account pool loaded: %s ready slots", ready_count)
-        return ready_count
-
-    # ── Queries ───────────────────────────────────────────────────────────────
+        ready = sum(1 for s in slots if s.ready)
+        logger.info("Account pool loaded: %s ready", ready)
+        return ready
 
     def size(self) -> int:
-        with self._lock:
-            return sum(1 for s in self._slots if s.ready)
+        with self._lock: return sum(1 for s in self._slots if s.ready)
 
     def all_apis(self) -> List[PikPakAPI]:
-        """Tất cả API sẵn sàng."""
-        with self._lock:
-            return [s.api for s in self._slots if s.ready and s.api]
+        with self._lock: return [s.api for s in self._slots if s.ready and s.api]
 
     def acquire(self) -> Optional[PikPakAPI]:
-        """Lấy 1 API theo round-robin (dùng cho Restore/Delete)."""
         with self._lock:
             ready = [s for s in self._slots if s.ready]
-            if not ready:
-                return None
+            if not ready: return None
             idx = self._rr_idx % len(ready)
             self._rr_idx = (self._rr_idx + 1) % len(ready)
             return ready[idx].api
 
     async def get_stripe_urls_async(self, get_url_fn_per_api) -> List[Optional[str]]:
-        """
-        Lấy download URL từ mỗi account song song (async).
-        get_url_fn_per_api(api) → str | None
-
-        Trả về list URL theo thứ tự slot:
-          [url_acc0, url_acc1, url_acc2, ...]
-        None nếu account đó không lấy được URL.
-        """
         apis = self.all_apis()
-        if not apis:
-            return []
+        if not apis: return []
 
         async def _fetch(api: PikPakAPI):
-            try:
-                url = await get_url_fn_per_api(api)
-            except Exception:
-                url = None
-            return url
+            try: return await get_url_fn_per_api(api)
+            except Exception: return None
 
-        tasks = [asyncio.create_task(_fetch(api)) for api in apis]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*[asyncio.create_task(_fetch(a)) for a in apis], return_exceptions=True)
         return [r if not isinstance(r, Exception) else None for r in results]
-
-    async def reauth_all(self) -> None:
-        with self._lock:
-            slots = list(self._slots)
-        for slot in slots:
-            await slot.authenticate()
 
     def status_lines(self) -> List[str]:
         lines = []
@@ -146,12 +107,8 @@ class AccountPool:
                 lines.append(f"[{col}]{icon} Account {tag}{err}[/]")
         return lines
 
-
-# ── Singleton ─────────────────────────────────────────────────────────────────
-
 _pool_instance: Optional[AccountPool] = None
 _pool_lock     = threading.Lock()
-
 
 def get_pool() -> AccountPool:
     global _pool_instance
@@ -159,7 +116,6 @@ def get_pool() -> AccountPool:
         if _pool_instance is None:
             _pool_instance = AccountPool()
     return _pool_instance
-
 
 async def reload_pool(verbose: bool = False) -> int:
     global _pool_instance
