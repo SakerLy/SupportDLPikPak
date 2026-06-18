@@ -4,18 +4,22 @@ import subprocess
 import time
 from core.logger import init_logger, logger
 
+
 def install_requirements():
-    if getattr(sys, 'frozen', False): return
+    if getattr(sys, "frozen", False):
+        return
     required = ["aiohttp", "aiofiles", "requests", "rich"]
     missing = []
     for lib in required:
-        try: __import__(lib)
-        except ImportError: missing.append(lib)
+        try:
+            __import__(lib)
+        except ImportError:
+            missing.append(lib)
 
     if missing:
-        print("="*60)
+        print("=" * 60)
         print(" INSTALLING MISSING LIBRARIES...")
-        print("="*60)
+        print("=" * 60)
         for lib in missing:
             print(f"⏳ Installing: {lib}...")
             try:
@@ -27,6 +31,7 @@ def install_requirements():
         print("-" * 60)
         print("✓ Done. Starting Tool...")
         time.sleep(1)
+
 
 def main():
     install_requirements()
@@ -41,15 +46,22 @@ def main():
         CacheManager.init()
         Config.setup_dirs()
         Config.migrate_config()
+        import asyncio
+        from core.garbage_collector import CloudGarbageCollector
+
+        asyncio.run(CloudGarbageCollector().run())
         Menu().main_menu()
     except ImportError as e:
         logger.exception("Failed to import modules")
-        print(f"Error: Could not import modules. Ensure you are running main.py from the root folder.\nDetails: {e}")
+        print(
+            f"Error: Could not import modules. Ensure you are running main.py from the root folder.\nDetails: {e}"
+        )
         input("Press Enter to exit...")
     except Exception as e:
         logger.exception("Unhandled exception in main")
         print(f"An unexpected error occurred:\n{e}")
         input("Press Enter to exit...")
+
 
 if __name__ == "__main__":
     main()

@@ -8,7 +8,7 @@ from rich.console import Console
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-APP_VERSION      = "0.0.6 (patch 1)"
+APP_VERSION      = "0.0.7"
 APP_AUTHOR       = "SakerLy"
 GITHUB_ZIP_URL   = "https://github.com/SakerLy/SupportDLPikPak/archive/refs/heads/main.zip"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/SakerLy/SupportDLPikPak/refs/heads/main/config/settings.py"
@@ -205,6 +205,7 @@ class Config:
     USE_CACHE          = True
     CONCURRENT_THREADS = 8
     EXTRA_ACCOUNTS: list = []
+    LOG_LEVEL          = "INFO"
 
     @classmethod
     def get_download_dir(cls):
@@ -289,6 +290,7 @@ class Config:
                 cls.CONCURRENT_THREADS = int(d.get("concurrent_threads", 8))
                 cls.FORCE_PREMIUM_MODE = d.get("force_premium_mode", False)
                 cls.EXTRA_ACCOUNTS     = d.get("extra_accounts",   [])
+                cls.LOG_LEVEL          = d.get("log_level", "INFO").upper()
             except: pass
         if not cls.DEVICE_ID:
             cls.DEVICE_ID = uuid.uuid4().hex
@@ -314,6 +316,7 @@ class Config:
                 "concurrent_threads": cls.CONCURRENT_THREADS,
                 "force_premium_mode": cls.FORCE_PREMIUM_MODE,
                 "extra_accounts":     cls.EXTRA_ACCOUNTS,
+                "log_level":          cls.LOG_LEVEL,
             }
             with open(cls.CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
