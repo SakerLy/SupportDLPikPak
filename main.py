@@ -46,10 +46,6 @@ def main():
         CacheManager.init()
         Config.setup_dirs()
         Config.migrate_config()
-        import asyncio
-        from core.garbage_collector import CloudGarbageCollector
-
-        asyncio.run(CloudGarbageCollector().run())
         Menu().main_menu()
     except ImportError as e:
         logger.exception("Failed to import modules")
