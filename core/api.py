@@ -6,6 +6,7 @@ import asyncio
 from config.settings import Config, console, Language
 from core.utils import HttpClient, CacheManager
 from core.logger import logger
+from core import cloud_ledger
 
 
 class PikPakLogin:
@@ -137,6 +138,11 @@ class PikPakAPI:
         self.headers = {}
         self._token_time = 0.0
         self._root_id = None
+        # Tên hiển thị trong log ("MAIN", "#1"...) và lý do refresh thất bại gần nhất
+        self.label = "MAIN" if self._is_main else "?"
+        self.last_error = ""
+        # True khi PikPak đã thu hồi refresh token: chỉ đăng nhập lại mới sửa được
+        self.needs_relogin = False
 
     def _sync_main_credentials(self):
         Config.load_config()
@@ -199,11 +205,30 @@ class PikPakAPI:
             timeout=15,
         )
         if not data or "access_token" not in data:
+            err = (data or {}).get("error", "") if isinstance(data, dict) else ""
+            desc = (
+                (data or {}).get("error_description", "") if isinstance(data, dict) else ""
+            )
+            err_code = (data or {}).get("error_code", "") if isinstance(data, dict) else ""
+            # invalid_grant = token bị thu hồi / hết hạn / đã bị thay bằng token mới hơn
+            self.needs_relogin = err == "invalid_grant"
+            self.last_error = (
+                f"{err} {err_code}: {desc}".strip(" :")
+                if err
+                else (f"HTTP {code}" if code else (text or "network error")[:120])
+            )
+            # Nội dung phản hồi đầy đủ đã có ở dòng DEBUG của HttpClient
             logger.error(
-                "Refresh token thất bại (HTTP %s): %s", code, (text or "")[:200]
+                "Account %s: refresh token thất bại (HTTP %s, %s)%s",
+                self.label,
+                code,
+                self.last_error,
+                " — cần đăng nhập lại" if self.needs_relogin else "",
             )
             return False
 
+        self.needs_relogin = False
+        self.last_error = ""
         self.access_token = data["access_token"]
         self._token_time = time.time()
         self.headers = {
@@ -383,7 +408,10 @@ class PikPakAPI:
                 return None, self._extract_error(tdata, "task_error")
             if phase == "PHASE_TYPE_COMPLETE":
                 new_id = self._parse_new_file_id(tdata, file_id)
-                return (new_id, None) if new_id else (None, "parse_failed")
+                if new_id:
+                    self.track_temp_file(new_id)
+                    return new_id, None
+                return None, "parse_failed"
         return None, "timeout"
 
     def _parse_new_file_id(self, task_data: dict, original_file_id: str):
@@ -489,14 +517,34 @@ class PikPakAPI:
             await asyncio.sleep(1)
         return None
 
+    @property
+    def account_key(self) -> str:
+        return self.device_id or ""
+
+    def track_temp_file(self, file_id: str):
+        # Ghi nhận file do tool tạo ra để GC dọn nếu lần này bị tắt ngang
+        cloud_ledger.add(self.account_key, file_id)
+
+    def is_temp_file(self, file_id: str) -> bool:
+        return cloud_ledger.contains(self.account_key, file_id)
+
     async def delete_file(self, file_id: str):
+        return await self.delete_files([file_id])
+
+    async def delete_files(self, file_ids) -> bool:
+        file_ids = [i for i in file_ids if i]
+        if not file_ids:
+            return True
         code, _, _ = await HttpClient.request(
             "POST",
             f"{self.BASE_URL}/drive/v1/files:batchDelete",
             headers=self.headers,
-            json_data={"ids": [file_id]},
+            json_data={"ids": file_ids},
         )
-        return code == 200
+        if code == 200:
+            cloud_ledger.remove(self.account_key, file_ids)
+            return True
+        return False
 
 
 class TreeBuilder:

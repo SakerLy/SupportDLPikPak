@@ -1,5 +1,6 @@
 import aiohttp
 import asyncio
+import logging
 import requests
 import json
 import hashlib
@@ -126,13 +127,11 @@ class HttpClient:
         params=None,
         json_data=None,
         form_data=None,
-        use_proxy: bool = False,
         timeout: float = None,
     ):
-        logger.debug("HTTP request %s %s use_proxy=%s", method, url, use_proxy)
+        logger.debug("HTTP request %s %s", method, url)
         try:
             session = HttpClient._get_session()
-            proxies = Config.get_proxy_dict() if use_proxy else None
             async with session.request(
                 method,
                 url,
@@ -140,7 +139,6 @@ class HttpClient:
                 params=params,
                 json=json_data,
                 data=form_data,
-                proxy=proxies.get("http") if proxies else None,
                 timeout=aiohttp.ClientTimeout(
                     total=timeout or Config.TIMEOUT, connect=10
                 ),
@@ -150,9 +148,22 @@ class HttpClient:
                     data = json.loads(text) if text else None
                 except ValueError:
                     data = None
+                if response.status >= 400:
+                    logger.debug(
+                        "HTTP %s %s -> %s: %s", method, url, response.status, text[:300]
+                    )
                 return response.status, data, text
         except Exception as e:
-            logger.exception("HTTP request failed %s %s", method, url)
+            # Lỗi mạng thường chỉ là tạm thời và được gọi lại, nên là WARNING;
+            # traceback đầy đủ chỉ ghi khi bật DEBUG
+            logger.warning(
+                "HTTP request failed %s %s: %s: %s",
+                method,
+                url,
+                type(e).__name__,
+                e,
+                exc_info=logger.isEnabledFor(logging.DEBUG),
+            )
             return 0, None, str(e)
 
 
@@ -198,7 +209,7 @@ class UpdateManager:
                         webbrowser.open(html_url)
                 else:
                     if Confirm.ask(Language.get("update_ask_src")):
-                        UpdateManager.perform_source_update()
+                        UpdateManager.perform_full_zip_update()
             except Exception:
                 pass
 
@@ -235,7 +246,10 @@ class UpdateManager:
                 if not subfolders:
                     raise Exception("Invalid ZIP structure")
                 source_folder = subfolders[0]
+                keep = {"config.json", "downloads", "logs", ".cache", "cloud_temp.json"}
                 for item in source_folder.iterdir():
+                    if item.name in keep:
+                        continue
                     dest_item = BASE_DIR / item.name
                     if item.is_dir():
                         if dest_item.exists():
@@ -250,9 +264,16 @@ class UpdateManager:
             if extract_path.exists():
                 shutil.rmtree(extract_path)
             time.sleep(2)
-            os.execv(sys.executable, ["python"] + sys.argv)
+            if os.name == "nt":
+                # execv trên Windows không giữ console và lỗi với đường dẫn có dấu cách
+                import subprocess
+
+                subprocess.call([sys.executable] + sys.argv)
+                sys.exit(0)
+            os.execv(sys.executable, [sys.executable] + sys.argv)
         except Exception as e:
-            console.print(f"[bold red]✖ Update failed: {e}[/]")
+            logger.exception("Update failed")
+            console.print(f"[bold red]{Language.get('update_fail')}: {e}[/]")
             if temp_zip.exists():
                 temp_zip.unlink()
             if extract_path.exists():

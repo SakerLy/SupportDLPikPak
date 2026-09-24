@@ -1,7 +1,7 @@
 import threading
 import uuid
 from typing import Optional, List
-from config.settings import Config, console
+from config.settings import Config, console, Language
 from core.api import PikPakAPI
 from core.logger import logger
 
@@ -14,6 +14,7 @@ class _AccountSlot:
             device_id=device_id or uuid.uuid4().hex,
             on_token_update=self._persist_token,
         )
+        self.api.label = "MAIN" if index == 0 else f"#{index}"
         self.ready = False
         self.error = ""
 
@@ -31,7 +32,7 @@ class _AccountSlot:
     async def authenticate(self) -> bool:
         try:
             self.ready = await self.api.refresh_token()
-            self.error = "" if self.ready else "Token refresh failed"
+            self.error = "" if self.ready else (self.api.last_error or "Token refresh failed")
         except Exception as e:
             self.ready = False
             self.error = str(e)
@@ -60,8 +61,15 @@ class AccountPool:
             ok = await slot.authenticate()
             if verbose:
                 tag = "(main)" if slot.index == 0 else ""
+                reason = ""
+                if not ok:
+                    reason = (
+                        f" — {Language.get('acc_relogin_needed')}"
+                        if slot.api.needs_relogin
+                        else f" — {slot.error}"
+                    )
                 console.print(
-                    f"  [{'green' if ok else 'red'}]{'✓' if ok else '✖'} Account #{slot.index} {tag}[/]"
+                    f"  [{'green' if ok else 'red'}]{'✓' if ok else '✖'} Account #{slot.index} {tag}{reason}[/]"
                 )
 
         with self._lock:
@@ -71,6 +79,15 @@ class AccountPool:
         ready = sum(1 for s in slots if s.ready)
         logger.info("Account pool loaded: %s ready", ready)
         return ready
+
+    def failed(self) -> List["_AccountSlot"]:
+        """Các account không xác thực được ở lần load gần nhất."""
+        with self._lock:
+            return [s for s in self._slots if not s.ready]
+
+    def slot_by_index(self, index: int) -> Optional["_AccountSlot"]:
+        with self._lock:
+            return next((s for s in self._slots if s.index == index), None)
 
     def size(self) -> int:
         with self._lock:

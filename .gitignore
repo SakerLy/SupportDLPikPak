@@ -6,3 +6,6 @@ downloads
 *.pyo
 *.pyd
 logs
+cloud_temp.json
+config.json.bak
+*.json.tmp

@@ -15,10 +15,12 @@ from rich.console import Group
 from rich.table import Table
 from rich.panel import Panel
 from rich import box
+from rich.markup import escape as rich_escape
 from config.settings import Config, console, Language
 from core.api import PikPakAPI, TreeBuilder
 from core.account_pool import get_pool
 from core.garbage_collector import CloudGarbageCollector
+from core import proxy as proxy_mod
 from core.logger import logger, ctx_acc, ctx_range
 
 
@@ -59,22 +61,60 @@ def _jitter(base: float) -> float:
 
 
 def _make_connector() -> aiohttp.TCPConnector:
-    try:
-        import aiodns
+    # ThreadedResolver (DNS của hệ điều hành) + cache 5 phút là đủ vì chỉ có vài host.
+    # Không dùng aiodns: c-ares hay lỗi "Could not contact DNS servers" trên
+    # Windows/VPN, khi đó mọi kết nối đều hỏng.
+    resolver = aiohttp.ThreadedResolver()
 
-        resolver = aiohttp.AsyncResolver()
-    except ImportError:
-        resolver = aiohttp.ThreadedResolver()
-
-    return aiohttp.TCPConnector(
+    # Khi bật proxy, connector sẽ là ProxyConnector (hỗ trợ http/https/socks4/socks5)
+    return proxy_mod.make_connector(
         resolver=resolver,
         limit=0,
         limit_per_host=0,
-        verify_ssl=False,
+        ssl=False,
         keepalive_timeout=60,
         ttl_dns_cache=300,
         family=socket.AF_INET,
     )
+
+
+def _stream_timeout() -> ClientTimeout:
+    # Không giới hạn tổng thời gian (file lớn tải lâu là bình thường),
+    # chỉ cắt khi kết nối/đọc bị treo
+    return ClientTimeout(
+        total=None, sock_connect=15, sock_read=max(60, Config.TIMEOUT)
+    )
+
+
+_INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def safe_name(name: str) -> str:
+    """Tên file/thư mục hợp lệ trên Windows/Android/iOS, không thoát ra ngoài thư mục tải."""
+    name = _INVALID_CHARS.sub("_", name or "").strip().rstrip(". ")
+    if name in ("", ".", ".."):
+        name = "_"
+    if name.split(".")[0].upper() in _RESERVED_NAMES:
+        name = "_" + name
+    # Giới hạn 200 byte để còn chỗ cho hậu tố .tmp/.ckpt
+    while len(name.encode("utf-8")) > 200:
+        stem, dot, ext = name.rpartition(".")
+        if dot and stem and len(ext) <= 10:
+            name = stem[:-1] + "." + ext
+        else:
+            name = name[:-1]
+    return name
+
+
+def safe_rel_dir(path: str) -> Path:
+    # file_data["path"] dạng "Thư mục/Con/file.ext" (luôn dùng "/")
+    parts = [safe_name(p) for p in (path or "").split("/")[:-1] if p]
+    return Path(*parts) if parts else Path()
 
 
 class Downloader:
@@ -227,9 +267,9 @@ class Downloader:
         )
 
         cancel_hint = (
-            "[bold red] ⛔ CANCELLING...[/]"
+            f"[bold red] {Language.get('dl_cancelling')}[/]"
             if self.cancel_event.is_set()
-            else "  [dim]Press [bold]Q[/bold] to cancel[/]"
+            else f"  [dim]{Language.get('dl_cancel_hint')}[/]"
         )
 
         stats_grid = Table.grid(expand=True)
@@ -279,7 +319,7 @@ class Downloader:
             )
             task_table.add_row(
                 str(p["id"]),
-                p["name"],
+                rich_escape(p["name"]),
                 f"{bar} {pct:.0f}%",
                 f"{self.format_size(p.get('speed', 0))}/s",
                 self.format_time(p.get("eta", 0)),
@@ -305,8 +345,6 @@ class Downloader:
     ) -> bool:
         h = headers.copy()
         h["Range"] = f"bytes={seg_start}-{seg_end}"
-        proxy = Config.get_proxy_dict()
-        proxy_url = proxy.get("http") if proxy else None
 
         for attempt in range(_503_MAX_RETRY):
             if self.cancel_event.is_set():
@@ -318,13 +356,15 @@ class Downloader:
 
             attempt_bytes = 0
             try:
-                async with session.get(url, headers=h, proxy=proxy_url) as r:
+                async with session.get(url, headers=h) as r:
                     if r.status in (503, 429):
+                        logger.debug(f"HTTP {r.status}, chờ rồi thử lại (lần {attempt + 1})")
                         await asyncio.sleep(
                             min(_jitter(_503_BASE_DELAY * (2**attempt)), _503_MAX_DELAY)
                         )
                         continue
                     if r.status in (401, 403, 500, 502, 504):
+                        logger.debug(f"HTTP {r.status}, thử lại (lần {attempt + 1})")
                         await asyncio.sleep(_jitter(1.5**attempt))
                         continue
 
@@ -358,11 +398,10 @@ class Downloader:
 
             except DiskFullError:
                 raise
-            except (aiohttp.ClientProxyConnectionError, aiohttp.ClientHttpProxyError):
-                proxy_url = None
-                await asyncio.sleep(1)
             except Exception as e:
-                logger.debug(f"Fetch error: {e}")
+                logger.debug(
+                    f"Fetch lỗi (lần {attempt + 1}/{_503_MAX_RETRY}): {type(e).__name__}: {e}"
+                )
                 await asyncio.sleep(min(_jitter(2**attempt), 16))
 
             seg_progress[worker_id] = 0
@@ -418,9 +457,7 @@ class Downloader:
                     f.truncate(file_size)
             except OSError as e:
                 if e.errno == errno.ENOSPC:
-                    console.print(
-                        "\n[bold red]✖ LỖI HỆ THỐNG: Ổ cứng đầy! Không thể tạo file mmap.[/]"
-                    )
+                    console.print(f"\n[bold red]{Language.get('err_disk_full')}[/]")
                     self.progress_data[thread_id]["status"] = "Disk Full"
                     self.cancel_event.set()
                     return False
@@ -467,7 +504,7 @@ class Downloader:
         )
 
         connector = _make_connector()
-        timeout = ClientTimeout(total=120, connect=15)
+        timeout = _stream_timeout()
 
         try:
             with open(file_path, "r+b") as fd:
@@ -633,8 +670,8 @@ class Downloader:
                                 await _requeue()
                                 break
                             except Exception as e:
-                                logger.error(
-                                    f"Worker Exception, trả Range về Queue: {e}"
+                                logger.warning(
+                                    f"Worker lỗi, trả Range về hàng đợi: {type(e).__name__}: {e}"
                                 )
                                 await _requeue()
                                 await asyncio.sleep(_jitter(2))
@@ -717,9 +754,7 @@ class Downloader:
             raise
         except OSError as e:
             if e.errno == errno.ENOSPC:
-                console.print(
-                    "\n[bold red]✖ LỖI HỆ THỐNG: Ổ cứng đầy! Dừng toàn bộ.[/]"
-                )
+                console.print(f"\n[bold red]{Language.get('err_disk_full')}[/]")
                 self.cancel_event.set()
             logger.error(f"Lỗi File / Mmap: {e}")
             return False
@@ -764,7 +799,7 @@ class Downloader:
             full_seen = False
             for idx, a in enumerate(apis):
                 if self.cancel_event.is_set():
-                    return None, None
+                    return None, None, False
                 if id(a) in self.full_accounts:
                     full_seen = True
                     continue
@@ -774,13 +809,18 @@ class Downloader:
                     logger.warning(f"Account {label}: xác thực thất bại, bỏ qua.")
                     continue
 
-                # Xóa bản kẹt từ lần chạy trước (nếu có) để giải phóng chỗ trước khi restore
+                # Xóa bản kẹt do tool tạo từ lần chạy trước (nếu có) để giải phóng chỗ.
+                # File trùng tên mà KHÔNG do tool tạo là file của người dùng: giữ nguyên.
+                preexisting = None
                 stale = await a.wait_for_file(name, max_retries=1, expected_size=size)
                 if stale and stale not in self.active_cloud_ids:
-                    try:
-                        await asyncio.wait_for(a.delete_file(stale), timeout=10)
-                    except Exception:
-                        pass
+                    if a.is_temp_file(stale):
+                        try:
+                            await asyncio.wait_for(a.delete_file(stale), timeout=10)
+                        except Exception:
+                            pass
+                    else:
+                        preexisting = stale
 
                 fid, error = await a.restore_and_poll(share_id, src_file_id, pass_token)
 
@@ -788,7 +828,7 @@ class Downloader:
                     logger.info(
                         f"Đã lưu '{name}' vào Account {label}. Tiến hành lấy link tải."
                     )
-                    return fid, a
+                    return fid, a, True
 
                 if self._is_storage_full(error):
                     self.full_accounts.add(id(a))
@@ -800,19 +840,22 @@ class Downloader:
 
                 fid = await a.wait_for_file(name, max_retries=8, expected_size=size)
                 if fid:
+                    owned = fid != preexisting
+                    if owned:
+                        a.track_temp_file(fid)
                     logger.info(
-                        f"Restore báo lỗi nhưng tìm thấy file trên Account {label}."
+                        f"Restore báo lỗi nhưng tìm thấy file trên Account {label} (file của tool: {owned})."
                     )
-                    return fid, a
+                    return fid, a, owned
                 logger.warning(
                     f"Account {label} lưu thất bại: {error}. Đang thử account khác..."
                 )
 
             if not full_seen or round_no == 1:
-                return None, None
+                return None, None, False
             if not await self._run_cloud_gc(apis):
-                return None, None
-        return None, None
+                return None, None, False
+        return None, None, False
 
     async def _restore_replicas(
         self, apis, primary_api, share_id, src_file_id, pass_token
@@ -892,9 +935,15 @@ class Downloader:
         if api is None:
             api = pool.acquire() or self.api
 
-        save_dir = Config.get_download_dir() / Path(file_data["path"]).parent
-        save_dir.mkdir(parents=True, exist_ok=True)
-        file_path = save_dir / name
+        save_dir = Config.get_download_dir() / safe_rel_dir(file_data["path"])
+        try:
+            save_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.error(f"Không tạo được thư mục {save_dir}: {e}")
+            self.progress_data[thread_id]["status"] = "Disk Error"
+            return False
+        # `name` giữ nguyên để so khớp file trên cloud, còn tên file local thì làm sạch
+        file_path = save_dir / safe_name(name)
         temp_file = file_path.parent / f".{file_path.name}.tmp"
         ckpt_file = temp_file.with_name(temp_file.name + ".ckpt")
 
@@ -914,14 +963,27 @@ class Downloader:
                 except:
                     pass
 
+        t_start = time.time()
+        _FAIL_STATUSES = ("Failed", "Restore Fail", "No Link", "No URL", "Auth Fail",
+                          "Err ", "Error", "Disk Full", "Disk Error")
+
         def _set_status(s):
             self.progress_data[thread_id]["status"] = s
+            if s.startswith(_FAIL_STATUSES):
+                logger.error(f"Tải thất bại '{name}': {s}")
+            elif s == "Cancelled":
+                logger.info(f"Đã hủy '{name}'")
 
         def _cancel_cleanup():
             _clean_local()
             _set_status("Cancelled")
 
         def _mark_done():
+            took = max(time.time() - t_start, 0.001)
+            logger.info(
+                f"Hoàn tất '{name}' ({self.format_size(real_total_size)}) trong {took:.0f}s"
+                f" | TB {self.format_size(real_total_size / took)}/s"
+            )
             self.progress_data[thread_id].update(
                 {
                     "percent": 100,
@@ -935,6 +997,7 @@ class Downloader:
         if use_premium:
             if file_path.exists():
                 if file_path.stat().st_size == real_total_size:
+                    logger.info(f"Bỏ qua '{name}': đã có file cùng dung lượng")
                     self.progress_data[thread_id].update(
                         {
                             "percent": 100,
@@ -949,9 +1012,12 @@ class Downloader:
 
             my_file_id = None
             active_api = None
+            owned = True
             dl_success = False
             was_cancelled = False
             replicas = []
+            # Chỉ xóa sau khi tải những file do tool tạo ra (không xóa file của người dùng)
+            cleanup = []
 
             # Xoay thứ tự để file này bắt đầu từ account được gán,
             # tránh mọi file cùng dồn vào account #1
@@ -973,7 +1039,7 @@ class Downloader:
 
                 _set_status(Language.get("status_restore"))
 
-                my_file_id, active_api = await self._restore_with_failover(
+                my_file_id, active_api, owned = await self._restore_with_failover(
                     apis, name, real_total_size, share_id, file_data["id"], pass_token
                 )
 
@@ -987,6 +1053,8 @@ class Downloader:
 
                 self.active_cloud_ids.add(my_file_id)
                 replicas = [(active_api, my_file_id)]
+                if owned:
+                    cleanup.append((active_api, my_file_id))
 
                 # File lớn: nhân bản sang các account rảnh để cộng dồn băng thông
                 if real_total_size >= STRIPE_MIN_SIZE and len(apis) > 1:
@@ -996,6 +1064,7 @@ class Downloader:
                     for a, fid in extra:
                         self.active_cloud_ids.add(fid)
                     replicas += extra
+                    cleanup += extra
 
                 if self.cancel_event.is_set():
                     was_cancelled = True
@@ -1053,9 +1122,7 @@ class Downloader:
                         _get_fresh_urls,
                     )
                 except DiskFullError:
-                    console.print(
-                        "\n[bold red]✖ LỖI HỆ THỐNG: Ổ cứng đầy! Dừng tải.[/]"
-                    )
+                    console.print(f"\n[bold red]{Language.get('err_disk_full')}[/]")
                     _set_status("Disk Full")
                     self.cancel_event.set()
                     was_cancelled = True
@@ -1079,6 +1146,7 @@ class Downloader:
             finally:
                 for a, fid in replicas:
                     self.active_cloud_ids.discard(fid)
+                for a, fid in cleanup:
                     task = asyncio.create_task(self._bg_delete(a, fid))
                     self.bg_tasks.add(task)
                     task.add_done_callback(self.bg_tasks.discard)
@@ -1105,6 +1173,7 @@ class Downloader:
                 return False
 
             if file_path.exists() and file_path.stat().st_size == real_total_size:
+                logger.info(f"Bỏ qua '{name}': đã có file cùng dung lượng")
                 self.progress_data[thread_id].update(
                     {"percent": 100, "status": SKIP_STATUS}
                 )
@@ -1112,14 +1181,12 @@ class Downloader:
 
             supports_range = False
             try:
-                proxy = Config.get_proxy_dict()
-                proxy_url = proxy.get("http") if proxy else None
                 conn = _make_connector()
                 async with aiohttp.ClientSession(
-                    connector=conn, timeout=ClientTimeout(total=10)
+                    connector=conn, timeout=ClientTimeout(total=15)
                 ) as s:
                     async with s.head(
-                        download_url, headers=BASE_HEADERS, proxy=proxy_url
+                        download_url, headers=BASE_HEADERS, allow_redirects=True
                     ) as probe:
                         supports_range = (
                             probe.status == 200
@@ -1150,9 +1217,7 @@ class Downloader:
                         _fresh_direct,
                     )
                 except DiskFullError:
-                    console.print(
-                        "\n[bold red]✖ LỖI HỆ THỐNG: Ổ cứng đầy! Dừng tải.[/]"
-                    )
+                    console.print(f"\n[bold red]{Language.get('err_disk_full')}[/]")
                     _set_status("Disk Full")
                     self.cancel_event.set()
                     ok = False
@@ -1168,6 +1233,7 @@ class Downloader:
                     _mark_done()
                     return True
                 _clean_local()
+                logger.warning(f"Tải đa luồng '{name}' thất bại, chuyển sang tải 1 luồng")
                 _set_status("Fallback...")
 
             try:
@@ -1191,17 +1257,13 @@ class Downloader:
                             _mark_done()
                             return True
 
-                proxy = Config.get_proxy_dict()
-                proxy_url = proxy.get("http") if proxy else None
                 conn = _make_connector()
-                timeout = ClientTimeout(total=Config.TIMEOUT)
+                timeout = _stream_timeout()
 
                 async with aiohttp.ClientSession(
                     connector=conn, timeout=timeout, read_bufsize=1024 * 1024
                 ) as session:
-                    async with session.get(
-                        download_url, headers=h, proxy=proxy_url
-                    ) as r:
+                    async with session.get(download_url, headers=h) as r:
                         if resume_pos > 0 and r.status == 200:
                             resume_pos = 0
                             mode = "wb"
@@ -1227,9 +1289,7 @@ class Downloader:
                                         await f.write(chunk)
                                     except OSError as e:
                                         if e.errno == errno.ENOSPC:
-                                            console.print(
-                                                "\n[bold red]✖ LỖI HỆ THỐNG: Ổ cứng đầy![/]"
-                                            )
+                                            console.print(f"\n[bold red]{Language.get('err_disk_full')}[/]")
                                             _set_status("Disk Full")
                                             self.cancel_event.set()
                                             return False
@@ -1276,6 +1336,7 @@ class Downloader:
                 return False
 
             except Exception:
+                logger.exception(f"Lỗi khi tải 1 luồng '{name}'")
                 _clean_local()
                 _set_status("Error")
                 return False

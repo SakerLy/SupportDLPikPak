@@ -1,0 +1,5 @@
+aiohttp>=3.9
+aiofiles
+requests
+rich
+aiohttp-socks>=0.9

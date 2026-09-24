@@ -8,13 +8,20 @@ from core.logger import init_logger, logger
 def install_requirements():
     if getattr(sys, "frozen", False):
         return
-    required = ["aiohttp", "aiofiles", "requests", "rich"]
+    # tên module import -> tên gói pip
+    required = {
+        "aiohttp": "aiohttp",
+        "aiofiles": "aiofiles",
+        "requests": "requests",
+        "rich": "rich",
+        "aiohttp_socks": "aiohttp-socks",
+    }
     missing = []
-    for lib in required:
+    for mod, pkg in required.items():
         try:
-            __import__(lib)
+            __import__(mod)
         except ImportError:
-            missing.append(lib)
+            missing.append(pkg)
 
     if missing:
         print("=" * 60)
@@ -38,9 +45,11 @@ def main():
     init_logger()
     logger.info("Starting PikPak Downloader")
     try:
-        from config.settings import Config
+        from config.settings import Config, APP_VERSION
         from core.utils import CacheManager
         from ui.menu import Menu
+
+        logger.info("Version %s", APP_VERSION)
 
         os.system("title PikPak Downloader" if os.name == "nt" else "")
         CacheManager.init()

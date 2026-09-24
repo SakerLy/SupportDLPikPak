@@ -2,13 +2,17 @@ import asyncio
 from core.account_pool import get_pool
 from core.api import PikPakAPI
 from core.utils import HttpClient
-from config.settings import console
+from core import cloud_ledger
+from config.settings import console, Language
 from core.logger import logger
 
 
 class CloudGarbageCollector:
-    def __init__(self, target_folder_name="PikPak_Temp_DL", quiet=False):
-        self.target_folder_name = target_folder_name
+    """Dọn các file tạm mà tool đã restore lên cloud nhưng chưa kịp xóa
+    (tắt ngang, mất mạng...). Chỉ xóa file có trong cloud ledger — không bao giờ
+    đụng tới file riêng của người dùng."""
+
+    def __init__(self, quiet=False):
         self.quiet = quiet
         self.batch_size = 50
         self.max_concurrent = 3
@@ -19,11 +23,11 @@ class CloudGarbageCollector:
         if not apis:
             logger.info("Garbage Collector: Không có tài khoản nào sẵn sàng.")
             return 0
+        if not any(cloud_ledger.get(a.account_key) for a in apis):
+            return 0
 
         if not self.quiet:
-            console.print(
-                "\n[bold yellow]🧹 Đang khởi chạy Cloud Garbage Collector...[/]"
-            )
+            console.print(f"\n[bold yellow]{Language.get('gc_start')}[/]")
 
         tasks = []
         for i, api in enumerate(apis):
@@ -32,7 +36,7 @@ class CloudGarbageCollector:
         results = await asyncio.gather(*tasks)
 
         if not self.quiet:
-            console.print("[bold green]✓ Hoàn tất kiểm tra và dọn dẹp Cloud![/]\n")
+            console.print(f"[bold green]{Language.get('gc_done')}[/]\n")
         return sum(results)
 
     async def clean_account(
@@ -40,32 +44,19 @@ class CloudGarbageCollector:
     ) -> int:
         exclude_ids = exclude_ids or set()
         try:
-            code, data, _ = await HttpClient.request(
-                "GET",
-                f"{api.BASE_URL}/drive/v1/files",
-                headers=api.headers,
-                params={"parent_id": "root", "limit": 100, "with_audit": "false"},
-            )
-            if not data or "files" not in data:
-                return 0
-
-            orphan_file_ids = [
-                f["id"]
-                for f in data["files"]
-                if f.get("kind") == "drive#file"
-                and not f.get("trashed", False)
-                and f["id"] not in exclude_ids
+            temp_ids = [
+                i for i in cloud_ledger.get(api.account_key) if i not in exclude_ids
             ]
-            if not orphan_file_ids:
+            if not temp_ids:
                 return 0
 
             logger.info(
-                f"[{acc_name}] Tìm thấy {len(orphan_file_ids)} file rác. Đang dọn dẹp..."
+                f"[{acc_name}] Có {len(temp_ids)} file tạm của tool còn trên cloud. Đang dọn dẹp..."
             )
 
             batches = [
-                orphan_file_ids[i : i + self.batch_size]
-                for i in range(0, len(orphan_file_ids), self.batch_size)
+                temp_ids[i : i + self.batch_size]
+                for i in range(0, len(temp_ids), self.batch_size)
             ]
             semaphore = asyncio.Semaphore(self.max_concurrent)
 
@@ -79,22 +70,26 @@ class CloudGarbageCollector:
                             json_data={"ids": batch_ids},
                         )
                         if code == 200:
+                            cloud_ledger.remove(api.account_key, batch_ids)
                             return True
                         if code in (429, 503):
                             await asyncio.sleep(2 * (attempt + 1))
-                        else:
-                            break
+                            continue
+                        if code in (400, 404):
+                            # File đã bị xóa từ trước: bỏ khỏi sổ để khỏi thử mãi
+                            cloud_ledger.remove(api.account_key, batch_ids)
+                        break
                     return False
 
             results = await asyncio.gather(*[_delete_batch(b) for b in batches])
             success_count = sum(len(b) for r, b in zip(results, batches) if r)
             if success_count > 0:
                 logger.info(
-                    f"[{acc_name}] Giải phóng thành công {success_count} file rác."
+                    f"[{acc_name}] Đã xóa {success_count} file tạm."
                 )
                 if not self.quiet:
                     console.print(
-                        f"  [dim]➜ {acc_name}: Giải phóng thành công {success_count} file rác.[/dim]"
+                        f"  [dim]{Language.get('gc_freed', acc=acc_name, n=success_count)}[/dim]"
                     )
             return success_count
 
