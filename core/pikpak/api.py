@@ -4,9 +4,10 @@ import uuid
 import json
 import asyncio
 from config.settings import Config, console, Language
-from core.utils import HttpClient, CacheManager
+from core.cache import CacheManager
+from core.net.http_client import HttpClient
 from core.logger import logger
-from core import cloud_ledger
+from core.pikpak import cloud_ledger
 
 
 class PikPakLogin:

@@ -7,7 +7,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from core.downloader import Downloader
+from core.download.downloader import Downloader
 
 DATA = os.urandom(5 * 1024 * 1024 + 123)
 

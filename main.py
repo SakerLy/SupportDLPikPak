@@ -46,7 +46,7 @@ def main():
     logger.info("Starting PikPak Downloader")
     try:
         from config.settings import Config, APP_VERSION
-        from core.utils import CacheManager
+        from core.cache import CacheManager
         from ui.menu import Menu
 
         logger.info("Version %s", APP_VERSION)

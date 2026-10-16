@@ -1,10 +1,11 @@
 import pytest
 
 from config.settings import Config
-from core import cloud_ledger
-from core.downloader import Downloader, safe_name, safe_rel_dir
-from core.proxy import parse_proxy_string
-from core.utils import UpdateManager
+from core.pikpak import cloud_ledger
+from core.download.downloader import Downloader
+from core.download.paths import safe_name, safe_rel_dir
+from core.net.proxy import parse_proxy_string
+from core.updater import UpdateManager
 
 
 @pytest.mark.parametrize(

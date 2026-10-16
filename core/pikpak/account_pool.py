@@ -3,7 +3,7 @@ import threading
 import uuid
 from typing import Optional, List
 from config.settings import Config, console, Language
-from core.api import PikPakAPI
+from core.pikpak.api import PikPakAPI
 from core.logger import logger
 
 
