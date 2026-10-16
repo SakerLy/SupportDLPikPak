@@ -364,6 +364,10 @@ class PikPakAPI:
             if root_id:
                 self._root_id = root_id
                 return root_id
+        # Cả hai cách tra đều không ra ID nhưng restore vào "root" vẫn chạy:
+        # lưu lại để không tốn 2 request vô ích cho mỗi file
+        if code2 == 200:
+            self._root_id = "root"
         return "root"
 
     @staticmethod
@@ -459,27 +463,8 @@ class PikPakAPI:
         for attempt in range(max_retries):
             if attempt:
                 await asyncio.sleep(2)
-            filters = json.dumps({"name": {"eq": filename}, "trashed": {"eq": False}})
-            code, data, _ = await HttpClient.request(
-                "GET",
-                f"{self.BASE_URL}/drive/v1/files",
-                headers=self.headers,
-                params={
-                    "thumbnail_size": "SIZE_MEDIUM",
-                    "limit": 20,
-                    "with_audit": "true",
-                    "filters": filters,
-                    "order_by": "modified_time",
-                    "sort": "desc",
-                },
-            )
-            if data:
-                for f in data.get("files", []):
-                    if self._match_file(f, filename, expected_size):
-                        return f["id"]
-            # Quét không filter tốn thêm 1 request: chỉ dùng khi filter lỗi hoặc ở lần cuối
-            if code == 200 and data is not None and attempt < max_retries - 1:
-                continue
+            # PikPak không cho lọc theo "name" (trả file_invalid_file_filters),
+            # nên lấy các file mới sửa gần nhất rồi so tên tại chỗ
             code2, data2, _ = await HttpClient.request(
                 "GET",
                 f"{self.BASE_URL}/drive/v1/files",
