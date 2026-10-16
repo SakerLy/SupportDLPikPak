@@ -369,14 +369,21 @@ class Downloader:
                         continue
 
                     r.raise_for_status()
+                    # Server bỏ qua Range và trả cả file: chỉ dùng được khi đoạn bắt đầu từ 0
+                    if r.status != 206 and seg_start != 0:
+                        logger.debug(f"HTTP {r.status} không hỗ trợ Range, thử lại (lần {attempt + 1})")
+                        await asyncio.sleep(_jitter(1.5**attempt))
+                        continue
 
                     offset = seg_start
+                    end = seg_end + 1
                     async for chunk in r.content.iter_any():
                         if self.cancel_event.is_set():
                             return False
                         if not chunk:
                             continue
 
+                        chunk = chunk[: end - offset]
                         chunk_len = len(chunk)
                         try:
                             mm[offset : offset + chunk_len] = chunk
@@ -393,8 +400,16 @@ class Downloader:
                         offset += chunk_len
                         attempt_bytes += chunk_len
                         seg_progress[worker_id] = attempt_bytes
+                        if offset >= end:
+                            break
 
-                return True
+                if offset >= end:
+                    return True
+                # Kết nối đóng sớm: đoạn chưa đủ byte, không được đánh dấu là xong
+                logger.debug(
+                    f"Range {seg_start}-{seg_end} thiếu {end - offset} byte, thử lại (lần {attempt + 1})"
+                )
+                await asyncio.sleep(_jitter(1))
 
             except DiskFullError:
                 raise
@@ -452,7 +467,12 @@ class Downloader:
                 pass
 
         if not file_path.exists() or file_path.stat().st_size != file_size:
+            completed_ranges = []
             try:
+                # Checkpoint rỗng phải có TRƯỚC file đã cấp phát đủ dung lượng, nếu không
+                # lần chạy sau sẽ tưởng file tạm toàn byte 0 là đã tải xong
+                with open(ckpt_file, "w", encoding="utf-8") as f:
+                    json.dump({"total": file_size, "completed_ranges": []}, f)
                 with open(file_path, "wb") as f:
                     f.truncate(file_size)
             except OSError as e:
@@ -960,7 +980,7 @@ class Downloader:
                 try:
                     if p.exists():
                         p.unlink()
-                except:
+                except OSError:
                     pass
 
         t_start = time.time()
@@ -1075,12 +1095,9 @@ class Downloader:
                 url_replicas = []
                 stripe_urls = []
                 for a, fid in replicas:
-                    url = None
-                    for _ in range(5 if a is active_api else 2):
-                        url = await a.get_user_file_url(fid)
-                        if url:
-                            break
-                        await asyncio.sleep(1.5)
+                    url = await a.get_user_file_url(
+                        fid, attempts=8 if a is active_api else 3
+                    )
                     if url:
                         url_replicas.append((a, fid))
                         stripe_urls.append(url)
@@ -1106,7 +1123,7 @@ class Downloader:
                     for a, fid in url_replicas:
                         try:
                             await a.ensure_token()
-                            out.append(await a.get_user_file_url(fid))
+                            out.append(await a.get_user_file_url(fid, attempts=2))
                         except Exception:
                             out.append(None)
                     return out
@@ -1135,7 +1152,7 @@ class Downloader:
 
                 if dl_success:
                     if temp_file.exists():
-                        temp_file.rename(file_path)
+                        temp_file.replace(file_path)
                     if ckpt_file.exists():
                         ckpt_file.unlink(missing_ok=True)
                     _mark_done()
@@ -1227,7 +1244,7 @@ class Downloader:
                     return False
                 if ok:
                     if temp_file.exists():
-                        temp_file.rename(file_path)
+                        temp_file.replace(file_path)
                     if ckpt_file.exists():
                         ckpt_file.unlink(missing_ok=True)
                     _mark_done()
@@ -1253,7 +1270,7 @@ class Downloader:
                             h["Range"] = f"bytes={resume_pos}-"
                             _set_status("Resuming...")
                         elif resume_pos >= real_total_size:
-                            temp_file.rename(file_path)
+                            temp_file.replace(file_path)
                             _mark_done()
                             return True
 
@@ -1330,9 +1347,11 @@ class Downloader:
                                         last_d = done
 
                 if temp_file.exists() and temp_file.stat().st_size >= real_total_size:
-                    temp_file.rename(file_path)
+                    temp_file.replace(file_path)
                     _mark_done()
                     return True
+                # Giữ file tạm để lần sau tải tiếp từ chỗ dừng
+                _set_status("Failed")
                 return False
 
             except Exception:

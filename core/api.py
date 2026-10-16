@@ -456,7 +456,8 @@ class PikPakAPI:
         self, filename: str, max_retries: int = 20, expected_size=None
     ):
         for attempt in range(max_retries):
-            await asyncio.sleep(2)
+            if attempt:
+                await asyncio.sleep(2)
             filters = json.dumps({"name": {"eq": filename}, "trashed": {"eq": False}})
             code, data, _ = await HttpClient.request(
                 "GET",
@@ -475,6 +476,9 @@ class PikPakAPI:
                 for f in data.get("files", []):
                     if self._match_file(f, filename, expected_size):
                         return f["id"]
+            # Quét không filter tốn thêm 1 request: chỉ dùng khi filter lỗi hoặc ở lần cuối
+            if code == 200 and data is not None and attempt < max_retries - 1:
+                continue
             code2, data2, _ = await HttpClient.request(
                 "GET",
                 f"{self.BASE_URL}/drive/v1/files",
@@ -493,8 +497,10 @@ class PikPakAPI:
                         return f["id"]
         return None
 
-    async def get_user_file_url(self, file_id: str):
-        for attempt in range(5):
+    async def get_user_file_url(self, file_id: str, attempts: int = 5, delay: float = 1.5):
+        for attempt in range(attempts):
+            if attempt:
+                await asyncio.sleep(delay)
             code, data, _ = await HttpClient.request(
                 "GET",
                 f"{self.BASE_URL}/drive/v1/files/{file_id}",
@@ -514,7 +520,9 @@ class PikPakAPI:
                     url = medias[0].get("link", {}).get("url")
                     if url:
                         return url
-            await asyncio.sleep(1)
+            if code in (401, 403):
+                # Token hỏng: thử lại với cùng token chỉ tốn thời gian
+                break
         return None
 
     @property

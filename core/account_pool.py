@@ -1,3 +1,4 @@
+import asyncio
 import threading
 import uuid
 from typing import Optional, List
@@ -57,8 +58,8 @@ class AccountPool:
             if rt:
                 slots.append(_AccountSlot(rt, acc.get("device_id", ""), i))
 
-        for slot in slots:
-            ok = await slot.authenticate()
+        results = await asyncio.gather(*(slot.authenticate() for slot in slots))
+        for slot, ok in zip(slots, results):
             if verbose:
                 tag = "(main)" if slot.index == 0 else ""
                 reason = ""

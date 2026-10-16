@@ -53,8 +53,8 @@ def main():
 
         os.system("title PikPak Downloader" if os.name == "nt" else "")
         CacheManager.init()
-        Config.setup_dirs()
         Config.migrate_config()
+        Config.setup_dirs()
         Menu().main_menu()
     except ImportError as e:
         logger.exception("Failed to import modules")

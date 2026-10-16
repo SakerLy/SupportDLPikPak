@@ -9,3 +9,5 @@ logs
 cloud_temp.json
 config.json.bak
 *.json.tmp
+.pytest_cache/
+.ruff_cache/

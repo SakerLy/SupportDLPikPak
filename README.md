@@ -17,6 +17,7 @@ Chạy được trên **Windows**, **Android** (qua Termux) và **iOS/iPadOS** (
 - [Cấu hình config.json](#cấu-hình-configjson)
 - [Cập nhật phiên bản mới](#cập-nhật-phiên-bản-mới)
 - [Lỗi thường gặp](#lỗi-thường-gặp)
+- [Dành cho người phát triển](#dành-cho-người-phát-triển)
 - [Miễn trừ trách nhiệm — Disclaimer](#miễn-trừ-trách-nhiệm--disclaimer)
 
 ---
@@ -214,7 +215,7 @@ user:pass@host:port
 host:port:user:pass
 ```
 
-Tool sẽ lưu và tự kiểm tra 3 bước **HTTP → HTTPS → PikPak**. Proxy chỉ áp dụng cho việc tải file; nên dùng `socks5` vì ổn định nhất.
+Tool sẽ lưu và tự kiểm tra 3 bước **HTTP → HTTPS → PikPak**. Proxy áp dụng cho cả đăng nhập, gọi API PikPak và tải file (riêng kiểm tra bản cập nhật GitHub thì không); nên dùng `socks5` vì ổn định nhất.
 
 **Các file tool tự tạo:**
 
@@ -286,6 +287,17 @@ Tool tự kiểm tra bản mới khi khởi động. Để cập nhật thủ c�
 | `config.json` bị hỏng | Tool giữ bản sao ở `config.json.bak` và không ghi đè file hỏng; sửa hoặc xóa file rồi đăng nhập lại. |
 | Báo ổ cứng đầy | Giải phóng dung lượng hoặc đổi thư mục tải sang ổ khác. |
 | Giao diện bị vỡ khung / lỗi font | Dùng Windows Terminal (Windows) hoặc thu nhỏ cỡ chữ / xoay ngang màn hình (điện thoại). |
+
+---
+
+## Dành cho người phát triển
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Test không cần mạng hay tài khoản PikPak: phần tải đa luồng được kiểm tra với một server HTTP cục bộ.
 
 ---
 

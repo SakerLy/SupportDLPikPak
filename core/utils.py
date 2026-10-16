@@ -15,6 +15,7 @@ from rich.panel import Panel
 from rich.prompt import Confirm
 from config.settings import Config, console, Language, APP_VERSION, GITHUB_ZIP_URL, GITHUB_VERSION_URL, GITHUB_RELEASE_URL, IS_FROZEN, BASE_DIR
 from core.logger import logger
+from core import proxy as proxy_mod
 
 
 class CacheManager:
@@ -97,15 +98,26 @@ class HttpClient:
     # tránh mở connector + TLS handshake mới cho mỗi request.
     _session: aiohttp.ClientSession = None
     _loop_id: int = None
+    _proxy_sig: str = None
 
     @classmethod
     def _get_session(cls) -> aiohttp.ClientSession:
         loop_id = id(asyncio.get_running_loop())
-        if cls._session is None or cls._session.closed or cls._loop_id != loop_id:
+        proxy_sig = proxy_mod.display_url(mask_password=False) if proxy_mod.is_enabled() else ""
+        if (
+            cls._session is None
+            or cls._session.closed
+            or cls._loop_id != loop_id
+            or cls._proxy_sig != proxy_sig
+        ):
+            # Session cũ thuộc cấu hình proxy trước: đóng ngầm, không chờ
+            if cls._session and not cls._session.closed and cls._loop_id == loop_id:
+                asyncio.ensure_future(cls._session.close())
             cls._session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(ssl=False, limit=64, ttl_dns_cache=300)
+                connector=proxy_mod.make_connector(ssl=False, limit=64, ttl_dns_cache=300)
             )
             cls._loop_id = loop_id
+            cls._proxy_sig = proxy_sig
         return cls._session
 
     @classmethod
@@ -118,6 +130,7 @@ class HttpClient:
             await cls._session.close()
         cls._session = None
         cls._loop_id = None
+        cls._proxy_sig = None
 
     @staticmethod
     async def request(
