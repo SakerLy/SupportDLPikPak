@@ -4,6 +4,7 @@ import threading
 import asyncio
 from rich.markup import escape as rich_escape
 from rich.live import Live
+from rich.text import Text
 from rich.panel import Panel
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
@@ -281,14 +282,17 @@ class DownloadMixin:
         return False
 
     def _auto_continue(self, seconds: int = 3):
-        for remaining in range(seconds, 0, -1):
-            msg = f"\r  [bold green]{Language.get('dl_auto_continue', n=remaining)}[/]  "
-            console.print(msg, end="")
-            start = time.time()
-            while time.time() - start < 1:
-                key = _read_key_nonblocking()
-                if key in ("\r", "\n", " "):
-                    console.print()
-                    return
-                time.sleep(0.05)
-        console.print()
+        def line(n):
+            return Text.from_markup(
+                f"  [bold green]{Language.get('dl_auto_continue', n=n)}[/]"
+            )
+
+        # Live ghi đè cùng một dòng; console.print với "\r" bị rich in thành nhiều dòng
+        with Live(line(seconds), console=console, auto_refresh=False) as live:
+            for remaining in range(seconds, 0, -1):
+                live.update(line(remaining), refresh=True)
+                start = time.time()
+                while time.time() - start < 1:
+                    if _read_key_nonblocking() in ("\r", "\n", " "):
+                        return
+                    time.sleep(0.05)
