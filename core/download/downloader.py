@@ -2,22 +2,15 @@ import threading
 import time
 import asyncio
 import re
-import aiohttp
 import aiofiles
 import errno
-from aiohttp import ClientTimeout
 from config.settings import Config, console, Language
 from core.pikpak.api import PikPakAPI, TreeBuilder
 from core.pikpak.account_pool import get_pool
 from core.logger import logger
 from core.download.paths import safe_name, safe_rel_dir
 from core.download.dashboard import DashboardMixin, DONE_STATUS, SKIP_STATUS
-from core.download.segmented import (
-    SegmentedDownloadMixin,
-    DiskFullError,
-    _make_connector,
-    _stream_timeout,
-)
+from core.download.segmented import SegmentedDownloadMixin, DiskFullError
 from core.download.cloud_restore import CloudRestoreMixin, STRIPE_MIN_SIZE
 
 _AUTO_CONN = [
@@ -411,23 +404,9 @@ class Downloader(DashboardMixin, SegmentedDownloadMixin, CloudRestoreMixin):
                 )
                 return True
 
-            supports_range = False
-            try:
-                conn = _make_connector()
-                async with aiohttp.ClientSession(
-                    connector=conn, timeout=ClientTimeout(total=15)
-                ) as s:
-                    async with s.head(
-                        download_url, headers=BASE_HEADERS, allow_redirects=True
-                    ) as probe:
-                        supports_range = (
-                            probe.status == 200
-                            and "bytes" in probe.headers.get("Accept-Ranges", "")
-                        )
-            except Exception:
-                pass
-
-            if supports_range and real_total_size > 1 * 1024 * 1024:
+            # Không hỏi trước bằng HEAD: server không hỗ trợ Range sẽ bị phát hiện
+            # ngay ở phản hồi đầu tiên và chuyển sang tải 1 luồng
+            if real_total_size > 1 * 1024 * 1024:
                 num_conn = self._resolve_conn(real_total_size)
                 _set_status(f"DL x{num_conn}conn")
 
@@ -489,77 +468,72 @@ class Downloader(DashboardMixin, SegmentedDownloadMixin, CloudRestoreMixin):
                             _mark_done()
                             return True
 
-                conn = _make_connector()
-                timeout = _stream_timeout()
+                session = self._dl_session()
+                async with session.get(download_url, headers=h) as r:
+                    if resume_pos > 0 and r.status == 200:
+                        resume_pos = 0
+                        mode = "wb"
+                        temp_file.unlink(missing_ok=True)
+                    if r.status not in (200, 206):
+                        _clean_local()
+                        _set_status(f"Err {r.status}")
+                        return False
 
-                async with aiohttp.ClientSession(
-                    connector=conn, timeout=timeout, read_bufsize=1024 * 1024
-                ) as session:
-                    async with session.get(download_url, headers=h) as r:
-                        if resume_pos > 0 and r.status == 200:
-                            resume_pos = 0
-                            mode = "wb"
-                            temp_file.unlink(missing_ok=True)
-                        if r.status not in (200, 206):
-                            _clean_local()
-                            _set_status(f"Err {r.status}")
-                            return False
+                    done = resume_pos
+                    start = time.time()
+                    last_t = start
+                    last_d = done
+                    current_speed = 0.0
 
-                        done = resume_pos
-                        start = time.time()
-                        last_t = start
-                        last_d = done
-                        current_speed = 0.0
+                    async with aiofiles.open(temp_file, mode) as f:
+                        async for chunk in r.content.iter_any():
+                            if self.cancel_event.is_set():
+                                _cancel_cleanup()
+                                return False
+                            if chunk:
+                                try:
+                                    await f.write(chunk)
+                                except OSError as e:
+                                    if e.errno == errno.ENOSPC:
+                                        console.print(f"\n[bold red]{Language.get('err_disk_full')}[/]")
+                                        _set_status("Disk Full")
+                                        self.cancel_event.set()
+                                        return False
+                                    raise
+                                done += len(chunk)
+                                now = time.time()
+                                if now - last_t >= 0.5:
+                                    inst_speed = max(0, done - last_d) / max(
+                                        now - last_t, 0.001
+                                    )
+                                    if current_speed == 0:
+                                        current_speed = inst_speed
+                                    else:
+                                        current_speed = (current_speed * 0.7) + (
+                                            inst_speed * 0.3
+                                        )
 
-                        async with aiofiles.open(temp_file, mode) as f:
-                            async for chunk in r.content.iter_any():
-                                if self.cancel_event.is_set():
-                                    _cancel_cleanup()
-                                    return False
-                                if chunk:
-                                    try:
-                                        await f.write(chunk)
-                                    except OSError as e:
-                                        if e.errno == errno.ENOSPC:
-                                            console.print(f"\n[bold red]{Language.get('err_disk_full')}[/]")
-                                            _set_status("Disk Full")
-                                            self.cancel_event.set()
-                                            return False
-                                        raise
-                                    done += len(chunk)
-                                    now = time.time()
-                                    if now - last_t >= 0.5:
-                                        inst_speed = max(0, done - last_d) / max(
-                                            now - last_t, 0.001
-                                        )
-                                        if current_speed == 0:
-                                            current_speed = inst_speed
-                                        else:
-                                            current_speed = (current_speed * 0.7) + (
-                                                inst_speed * 0.3
-                                            )
-
-                                        percent = (
-                                            min((done / real_total_size) * 100, 100)
-                                            if real_total_size
-                                            else 0
-                                        )
-                                        eta = (
-                                            (real_total_size - done) / current_speed
-                                            if current_speed > 0
-                                            else 0
-                                        )
-                                        self.progress_data[thread_id].update(
-                                            {
-                                                "percent": percent,
-                                                "speed": current_speed,
-                                                "status": "DL...",
-                                                "done_bytes": done,
-                                                "eta": eta,
-                                            }
-                                        )
-                                        last_t = now
-                                        last_d = done
+                                    percent = (
+                                        min((done / real_total_size) * 100, 100)
+                                        if real_total_size
+                                        else 0
+                                    )
+                                    eta = (
+                                        (real_total_size - done) / current_speed
+                                        if current_speed > 0
+                                        else 0
+                                    )
+                                    self.progress_data[thread_id].update(
+                                        {
+                                            "percent": percent,
+                                            "speed": current_speed,
+                                            "status": "DL...",
+                                            "done_bytes": done,
+                                            "eta": eta,
+                                        }
+                                    )
+                                    last_t = now
+                                    last_d = done
 
                 if temp_file.exists() and temp_file.stat().st_size >= real_total_size:
                     temp_file.replace(file_path)

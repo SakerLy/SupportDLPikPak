@@ -19,6 +19,11 @@ from core.logger import logger, ctx_acc, ctx_range
 class DiskFullError(Exception):
     pass
 
+
+class RangeNotSupported(Exception):
+    pass
+
+
 # TINH CHỈNH ĐỂ CHỐNG RỚT TỐC ĐỘ VỀ CUỐI
 MIN_CHUNK_SIZE = 1 * 1024 * 1024  # 1MB
 MAX_CHUNK_SIZE = (
@@ -62,6 +67,31 @@ def _stream_timeout() -> ClientTimeout:
 
 
 class SegmentedDownloadMixin:
+    _dl_sess: aiohttp.ClientSession = None
+    _dl_sess_key = None
+
+    def _dl_session(self) -> aiohttp.ClientSession:
+        # Dùng chung cho mọi file trong một lượt tải: giữ kết nối keep-alive,
+        # khỏi bắt tay lại TCP/TLS (và proxy) cho từng file
+        key = (
+            id(asyncio.get_running_loop()),
+            proxy_mod.display_url(mask_password=False) if proxy_mod.is_enabled() else "",
+        )
+        if self._dl_sess is None or self._dl_sess.closed or self._dl_sess_key != key:
+            self._dl_sess = aiohttp.ClientSession(
+                connector=_make_connector(),
+                timeout=_stream_timeout(),
+                read_bufsize=1024 * 1024,
+            )
+            self._dl_sess_key = key
+        return self._dl_sess
+
+    async def close_session(self):
+        if self._dl_sess and not self._dl_sess.closed:
+            await self._dl_sess.close()
+        self._dl_sess = None
+        self._dl_sess_key = None
+
     @staticmethod
     def _merge_ranges(ranges):
         if not ranges:
@@ -133,9 +163,7 @@ class SegmentedDownloadMixin:
                     r.raise_for_status()
                     # Server bỏ qua Range và trả cả file: chỉ dùng được khi đoạn bắt đầu từ 0
                     if r.status != 206 and seg_start != 0:
-                        logger.debug(f"HTTP {r.status} không hỗ trợ Range, thử lại (lần {attempt + 1})")
-                        await asyncio.sleep(_jitter(1.5**attempt))
-                        continue
+                        raise RangeNotSupported(f"HTTP {r.status} cho Range {seg_start}-{seg_end}")
 
                     offset = seg_start
                     end = seg_end + 1
@@ -173,7 +201,7 @@ class SegmentedDownloadMixin:
                 )
                 await asyncio.sleep(_jitter(1))
 
-            except DiskFullError:
+            except (DiskFullError, RangeNotSupported):
                 raise
             except Exception as e:
                 logger.debug(
@@ -284,9 +312,6 @@ class SegmentedDownloadMixin:
         self.progress_data[thread_id]["status"] = (
             "DL x1 acc" if len(valid_urls) == 1 else f"DL x{len(valid_urls)} acc"
         )
-
-        connector = _make_connector()
-        timeout = _stream_timeout()
 
         try:
             with open(file_path, "r+b") as fd:
@@ -451,6 +476,12 @@ class SegmentedDownloadMixin:
                                 shared["disk_full"] = True
                                 await _requeue()
                                 break
+                            except RangeNotSupported as e:
+                                if not shared["aborted"]:
+                                    logger.warning(f"Server không hỗ trợ tải theo đoạn ({e})")
+                                shared["aborted"] = True
+                                await _requeue()
+                                break
                             except Exception as e:
                                 logger.warning(
                                     f"Worker lỗi, trả Range về hàng đợi: {type(e).__name__}: {e}"
@@ -507,18 +538,11 @@ class SegmentedDownloadMixin:
 
                     flusher = asyncio.create_task(auto_flush())
                     ui_monitor = asyncio.create_task(speed_monitor())
+                    session = self._dl_session()
                     try:
-                        async with aiohttp.ClientSession(
-                            connector=connector,
-                            timeout=timeout,
-                            read_bufsize=1024 * 1024,
-                        ) as session:
-                            await asyncio.gather(
-                                *[
-                                    asyncio.create_task(worker(i))
-                                    for i in range(num_conn)
-                                ]
-                            )
+                        await asyncio.gather(
+                            *[asyncio.create_task(worker(i)) for i in range(num_conn)]
+                        )
                     finally:
                         flusher.cancel()
                         ui_monitor.cancel()

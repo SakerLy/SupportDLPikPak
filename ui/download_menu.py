@@ -214,11 +214,14 @@ class DownloadMixin:
                         tasks.append(
                             asyncio.create_task(sem_download(f, i, api_for_file))
                         )
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    if self.downloader.bg_tasks:
-                        await asyncio.gather(
-                            *list(self.downloader.bg_tasks), return_exceptions=True
-                        )
+                    try:
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        if self.downloader.bg_tasks:
+                            await asyncio.gather(
+                                *list(self.downloader.bg_tasks), return_exceptions=True
+                            )
+                    finally:
+                        await self.downloader.close_session()
 
                 _run(download_files())
                 self.downloader.stop_monitor()
