@@ -1,37 +1,55 @@
+<div align="center">
+
 # PikPak Downloader
 
-Công cụ dòng lệnh giúp tải file/thư mục từ link chia sẻ PikPak về máy bằng chính tài khoản của bạn — không cần cài app PikPak.
+**Tải file và thư mục từ link chia sẻ PikPak bằng chính tài khoản của bạn — không cần cài app PikPak.**
 
-Chạy được trên **Windows**, **Android** (qua Termux) và **iOS/iPadOS** (qua iSH).
+[![Release](https://img.shields.io/github/v/release/SakerLy/PikPakDownloader?label=phi%C3%AAn%20b%E1%BA%A3n&color=2ea44f)](https://github.com/SakerLy/PikPakDownloader/releases)
+[![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Platforms](https://img.shields.io/badge/n%E1%BB%81n%20t%E1%BA%A3ng-Windows%20%7C%20Android%20%7C%20iOS-555)](#cài-đặt-trên-windows)
+[![Tests](https://img.shields.io/badge/tests-32%20passed-success)](#dành-cho-người-phát-triển)
+[![License](https://img.shields.io/github/license/SakerLy/PikPakDownloader?color=blue)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/SakerLy/PikPakDownloader)](https://github.com/SakerLy/PikPakDownloader/commits/main)
+[![Stars](https://img.shields.io/github/stars/SakerLy/PikPakDownloader?style=social)](https://github.com/SakerLy/PikPakDownloader)
+
+[Cài đặt](#cài-đặt-trên-windows) · [Hướng dẫn](#hướng-dẫn-sử-dụng) · [Cấu hình](#cấu-hình-configjson) · [Lỗi thường gặp](#lỗi-thường-gặp) · [Changelog](CHANGELOG.md)
+
+</div>
 
 ---
 
-## Mục lục
+## Hiệu năng thực tế
 
-- [Tính năng](#tính-năng)
-- [Yêu cầu](#yêu-cầu)
-- [Cài đặt trên Windows](#cài-đặt-trên-windows)
-- [Cài đặt trên Android (Termux)](#cài-đặt-trên-android-termux)
-- [Cài đặt trên iOS / iPadOS (iSH)](#cài-đặt-trên-ios--ipados-ish)
-- [Hướng dẫn sử dụng](#hướng-dẫn-sử-dụng)
-- [Cấu hình config.json](#cấu-hình-configjson)
-- [Cập nhật phiên bản mới](#cập-nhật-phiên-bản-mới)
-- [Lỗi thường gặp](#lỗi-thường-gặp)
-- [Dành cho người phát triển](#dành-cho-người-phát-triển)
-- [Miễn trừ trách nhiệm — Disclaimer](#miễn-trừ-trách-nhiệm--disclaimer)
+Đo từ log chạy thật của bản **v0.1.0** (Windows 11, 1 tài khoản PikPak, qua proxy socks5):
+
+| Lượt tải | Số file | Dung lượng | Thời gian | Tốc độ trung bình | Lỗi |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Link nhẹ (ảnh + video ngắn) | 31 | 0,5 GB | 64 giây | 8,2 MB/s | 0 |
+| Link nặng (ảnh + video lớn) | 107 | 5,3 GB | 9 phút 11 giây | **9,6 MB/s** | 0 |
+
+| Chỉ số | v0.0.9 | v0.1.0 |
+|---|:---:|:---:|
+| Thời gian tải 1 ảnh 1–3 MB qua proxy | 2,75 giây | **1,95 giây** (−29%) |
+| Đoạn dữ liệu thiếu bị coi là đã xong | có thể xảy ra | **được phát hiện và tải lại** |
+
+> PikPak giới hạn khoảng **11 MB/s cho mỗi tài khoản**. Mỗi tài khoản phụ thêm vào (menu `6`) cộng thêm khoảng chừng đó băng thông.
 
 ---
 
 ## Tính năng
 
-- Đăng nhập và tải bằng chính tài khoản PikPak của bạn.
-- Dán nhiều link cùng lúc (cách nhau bằng dấu phẩy), chọn file cần tải trong danh sách.
-- Tải đa luồng; có thể thêm **tài khoản phụ** để tăng tốc độ.
-- Với video, tool tự lưu vào cloud của bạn, tải xong sẽ tự xóa để không tốn dung lượng.
-- Hỗ trợ proxy **http / https / socks4 / socks5** (có đăng nhập), dán nhanh chuỗi proxy và tự kiểm tra kết nối tới PikPak.
-- Đổi thư mục lưu, số luồng, timeout.
-- Giao diện tiếng Việt và tiếng Anh.
-- Tốc độ phụ thuộc vào mạng của bạn (đã test ổn định từ 10 Mb/s trở lên).
+| | Tính năng | Chi tiết |
+|---|---|---|
+| 🔗 | **Nhiều link một lúc** | Dán nhiều link (cách nhau bằng dấu phẩy), duyệt cả thư mục con, chọn file theo số thứ tự (`1-3,5`) |
+| ⚡ | **Tải đa luồng** | Tự chia file thành nhiều đoạn (tới 32 kết nối với file > 2 GB), tự điều chỉnh kích thước đoạn theo tốc độ mạng |
+| 👥 | **Gộp nhiều tài khoản** | File lớn được tải song song từ nhiều tài khoản để cộng dồn tốc độ |
+| ☁️ | **Premium Transfer** | Video/zip/rar/iso được lưu tạm lên cloud của bạn rồi tải về, xong tự xóa; không bao giờ đụng tới file riêng của bạn |
+| ⏯️ | **Tải tiếp khi bị ngắt** | Lưu checkpoint từng đoạn; mất mạng hay tắt tool, lần sau tải tiếp từ chỗ dừng |
+| 🛡️ | **Kiểm tra toàn vẹn** | Mỗi đoạn phải đủ dung lượng mới được tính là xong; tự thử lại khi server lỗi `503` / `429` |
+| 🌐 | **Proxy** | `http` / `https` / `socks4` / `socks5` có đăng nhập, áp dụng cho cả đăng nhập, API và tải file; tự kiểm tra 3 bước |
+| 📊 | **Bảng tiến trình** | Tốc độ, ETA từng file và tổng; nhấn `Q` để hủy an toàn |
+| 🌏 | **Song ngữ** | Giao diện tiếng Việt và tiếng Anh |
+| 🔄 | **Tự cập nhật** | Kiểm tra bản mới khi khởi động, cập nhật mã nguồn chỉ với một phím |
 
 ---
 
@@ -58,13 +76,13 @@ Chạy được trên **Windows**, **Android** (qua Termux) và **iOS/iPadOS** (
 ### Bước 2 — Tải mã nguồn
 
 **Cách 1 (đơn giản):** tải file ZIP tại
-https://github.com/SakerLy/SupportDLPikPak/archive/refs/heads/main.zip
+https://github.com/SakerLy/PikPakDownloader/archive/refs/heads/main.zip
 rồi giải nén ra một thư mục, ví dụ `D:\PikPakTool`.
 
 **Cách 2 (dùng Git):**
 ```bat
-git clone https://github.com/SakerLy/SupportDLPikPak.git
-cd SupportDLPikPak
+git clone https://github.com/SakerLy/PikPakDownloader.git
+cd PikPakDownloader
 ```
 
 ### Bước 3 — Cài thư viện
@@ -83,7 +101,7 @@ python main.py
 
 > 💡 Nên dùng **Windows Terminal** (có sẵn trên Windows 11) để giao diện hiển thị màu và khung viền đẹp nhất.
 >
-> 💡 Nếu trang [Releases](https://github.com/SakerLy/SupportDLPikPak/releases) có bản `.exe`, bạn có thể tải về chạy trực tiếp mà không cần cài Python.
+> 💡 Nếu trang [Releases](https://github.com/SakerLy/PikPakDownloader/releases) có bản `.exe`, bạn có thể tải về chạy trực tiếp mà không cần cài Python.
 
 ---
 
@@ -115,8 +133,8 @@ Bấm **Cho phép** khi Android hỏi. Sau bước này, bộ nhớ máy nằm �
 ### Bước 4 — Tải mã nguồn và cài thư viện
 
 ```bash
-git clone https://github.com/SakerLy/SupportDLPikPak.git
-cd SupportDLPikPak
+git clone https://github.com/SakerLy/PikPakDownloader.git
+cd PikPakDownloader
 pip install -r requirements.txt
 ```
 
@@ -135,7 +153,7 @@ python main.py
 - **Tránh bị Android tắt khi tải lâu:** chạy `termux-wake-lock` trước khi tải (hoặc kéo thanh thông báo của Termux và bấm *Acquire wakelock*), đồng thời tắt tối ưu pin cho Termux.
 - Lần sau mở lại tool:
   ```bash
-  cd ~/SupportDLPikPak && python main.py
+  cd ~/PikPakDownloader && python main.py
   ```
 
 ---
@@ -163,8 +181,8 @@ pip install --break-system-packages aiohttp-socks
 ### Bước 3 — Tải mã nguồn và chạy
 
 ```sh
-git clone https://github.com/SakerLy/SupportDLPikPak.git
-cd SupportDLPikPak
+git clone https://github.com/SakerLy/PikPakDownloader.git
+cd PikPakDownloader
 python3 main.py
 ```
 
@@ -179,7 +197,7 @@ python3 main.py
 - iOS có thể tạm dừng iSH khi bạn thoát ra màn hình chính. Giữ iSH mở trong lúc tải (có thể bật *Guided Access* hoặc tắt khóa màn hình tự động).
 - Lần sau mở lại tool:
   ```sh
-  cd ~/SupportDLPikPak && python3 main.py
+  cd ~/PikPakDownloader && python3 main.py
   ```
 
 ---
