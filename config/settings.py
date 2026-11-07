@@ -3,13 +3,10 @@ import json
 import uuid
 import os
 import shutil
-import urllib3
 from pathlib import Path
 from rich.console import Console
 from core.logger import normalize_level, set_log_level
 from config.i18n import STRINGS
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 APP_VERSION = "0.1.0"
 APP_AUTHOR = "SakerLy"
@@ -48,7 +45,6 @@ class Config:
     REFRESH_TOKEN = ""
     DEVICE_ID = ""
     MAIN_USER_ID = ""
-    CAPTCHA_TOKEN = ""
     LANGUAGE = "en"
     USE_PROXY = False
     PROXY_TYPE = "http"
@@ -110,7 +106,6 @@ class Config:
             cls.REFRESH_TOKEN = d.get("refresh_token", "") or ""
             cls.DEVICE_ID = d.get("device_id", "") or ""
             cls.MAIN_USER_ID = d.get("main_user_id", "") or ""
-            cls.CAPTCHA_TOKEN = d.get("captcha_token", "") or ""
             cls.MAX_WORKERS = cls._int(d.get("max_workers"), 3, lo=1, hi=32)
             cls.DOWNLOAD_PATH_STR = d.get("download_path", "downloads") or "downloads"
             cls.TIMEOUT = cls._int(d.get("timeout"), 30, lo=5, hi=600)
@@ -144,7 +139,6 @@ class Config:
                 "refresh_token": cls.REFRESH_TOKEN,
                 "device_id": cls.DEVICE_ID,
                 "main_user_id": cls.MAIN_USER_ID,
-                "captcha_token": cls.CAPTCHA_TOKEN,
                 "max_workers": cls.MAX_WORKERS,
                 "download_path": cls.DOWNLOAD_PATH_STR,
                 "timeout": cls.TIMEOUT,

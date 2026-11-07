@@ -9,7 +9,7 @@ from core.pikpak.api import PikPakAPI, TreeBuilder
 from core.pikpak.account_pool import get_pool
 from core.logger import logger
 from core.download.paths import safe_name, safe_rel_dir
-from core.download.dashboard import DashboardMixin, DONE_STATUS, SKIP_STATUS
+from core.download.dashboard import DashboardMixin, DONE_STATUS, SKIP_STATUS, FAIL_STATUSES
 from core.download.segmented import SegmentedDownloadMixin, DiskFullError
 from core.download.cloud_restore import CloudRestoreMixin, STRIPE_MIN_SIZE
 
@@ -184,7 +184,8 @@ class Downloader(DashboardMixin, SegmentedDownloadMixin, CloudRestoreMixin):
         }
 
         def _clean_local():
-            for p in (file_path, temp_file, ckpt_file):
+            # Chỉ xóa file tạm; file thật (nếu có) chỉ bị thay khi tải xong thành công
+            for p in (temp_file, ckpt_file):
                 try:
                     if p.exists():
                         p.unlink()
@@ -192,12 +193,10 @@ class Downloader(DashboardMixin, SegmentedDownloadMixin, CloudRestoreMixin):
                     pass
 
         t_start = time.time()
-        _FAIL_STATUSES = ("Failed", "Restore Fail", "No Link", "No URL", "Auth Fail",
-                          "Err ", "Error", "Disk Full", "Disk Error")
 
         def _set_status(s):
             self.progress_data[thread_id]["status"] = s
-            if s.startswith(_FAIL_STATUSES):
+            if s.startswith(FAIL_STATUSES):
                 logger.error(f"Tải thất bại '{name}': {s}")
             elif s == "Cancelled":
                 logger.info(f"Đã hủy '{name}'")
@@ -236,7 +235,6 @@ class Downloader(DashboardMixin, SegmentedDownloadMixin, CloudRestoreMixin):
                         }
                     )
                     return True
-                file_path.unlink(missing_ok=True)
 
             my_file_id = None
             active_api = None

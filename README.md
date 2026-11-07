@@ -7,7 +7,7 @@
 [![Release](https://img.shields.io/github/v/release/SakerLy/PikPakDownloader?label=phi%C3%AAn%20b%E1%BA%A3n&color=2ea44f)](https://github.com/SakerLy/PikPakDownloader/releases)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![Platforms](https://img.shields.io/badge/n%E1%BB%81n%20t%E1%BA%A3ng-Windows%20%7C%20Android%20%7C%20iOS-555)](#cài-đặt-trên-windows)
-[![Tests](https://img.shields.io/badge/tests-32%20passed-success)](#dành-cho-người-phát-triển)
+[![Tests](https://img.shields.io/badge/tests-35%20passed-success)](#dành-cho-người-phát-triển)
 [![License](https://img.shields.io/github/license/SakerLy/PikPakDownloader?color=blue)](LICENSE)
 [![Last commit](https://img.shields.io/github/last-commit/SakerLy/PikPakDownloader)](https://github.com/SakerLy/PikPakDownloader/commits/main)
 [![Stars](https://img.shields.io/github/stars/SakerLy/PikPakDownloader?style=social)](https://github.com/SakerLy/PikPakDownloader)
@@ -56,7 +56,7 @@
 ## Yêu cầu
 
 - **Python 3.11 trở lên**
-- Các thư viện trong [requirements.txt](requirements.txt): `aiohttp`, `aiohttp-socks`, `aiofiles`, `requests`, `rich`
+- Các thư viện trong [requirements.txt](requirements.txt): `aiohttp`, `aiohttp-socks`, `aiofiles`, `rich`
   (lần chạy đầu tool sẽ tự cài nếu thiếu, nhưng nên cài trước theo hướng dẫn bên dưới)
 
 ---
@@ -174,7 +174,7 @@ Mở iSH và chạy:
 
 ```sh
 apk update
-apk add python3 py3-pip git py3-aiohttp py3-aiofiles py3-requests py3-rich
+apk add python3 py3-pip git py3-aiohttp py3-aiofiles py3-rich
 pip install --break-system-packages aiohttp-socks
 ```
 
@@ -263,7 +263,7 @@ Hầu hết cài đặt đều chỉnh được trong menu `3`. Nếu muốn s�
 | `proxy_username`, `proxy_password` | `""` | Tài khoản proxy (để trống nếu không cần) |
 | `log_level` | `"INFO"` | Mức chi tiết của log, xem bảng dưới |
 
-> ⚠️ Không sửa tay các khóa `refresh_token`, `device_id`, `main_user_id`, `captcha_token`, `extra_accounts`: đây là dữ liệu đăng nhập do tool tự quản lý. Giá trị sai kiểu (vd. chữ thay vì số) sẽ được tự đưa về mặc định; nếu file bị hỏng hẳn, tool giữ nguyên file và tạo bản sao `config.json.bak`.
+> ⚠️ Không sửa tay các khóa `refresh_token`, `device_id`, `main_user_id`, `extra_accounts`: đây là dữ liệu đăng nhập do tool tự quản lý. Giá trị sai kiểu (vd. chữ thay vì số) sẽ được tự đưa về mặc định; nếu file bị hỏng hẳn, tool giữ nguyên file và tạo bản sao `config.json.bak`.
 
 ### Mức log (`log_level`)
 

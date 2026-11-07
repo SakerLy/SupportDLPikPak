@@ -3,8 +3,9 @@ import shutil
 import sys
 import time
 import webbrowser
+import json
 import zipfile
-import requests
+import urllib.request
 from rich.panel import Panel
 from rich.prompt import Confirm
 from config.settings import (
@@ -30,18 +31,19 @@ class UpdateManager:
         found_update = False
         latest_tag = ""
         html_url = ""
+        zip_url = GITHUB_ZIP_URL
         body = ""
         try:
             with console.status(
                 f"[bold cyan]{Language.get('update_check')}", spinner="dots"
             ):
-                response = requests.get(UpdateManager.API_URL, timeout=5)
-                if response.status_code != 200:
-                    return
-                data = response.json()
+                with urllib.request.urlopen(UpdateManager.API_URL, timeout=5) as resp:
+                    data = json.load(resp)
                 latest_tag = data.get("tag_name", "0.0.0").lstrip("v")
                 html_url = data.get("html_url", GITHUB_RELEASE_URL)
-                body = data.get("body", "No description")
+                # Tải đúng mã của bản release, không phải nhánh main (có thể đang dở dang)
+                zip_url = data.get("zipball_url") or GITHUB_ZIP_URL
+                body = data.get("body") or "No description"
                 if UpdateManager.is_newer_version(latest_tag, APP_VERSION):
                     found_update = True
         except Exception:
@@ -62,7 +64,7 @@ class UpdateManager:
                         webbrowser.open(html_url)
                 else:
                     if Confirm.ask(Language.get("update_ask_src")):
-                        UpdateManager.perform_full_zip_update()
+                        UpdateManager.perform_full_zip_update(zip_url)
             except Exception:
                 pass
 
@@ -76,19 +78,15 @@ class UpdateManager:
             return False
 
     @staticmethod
-    def perform_full_zip_update():
+    def perform_full_zip_update(zip_url=GITHUB_ZIP_URL):
         temp_zip = BASE_DIR / "update_temp.zip"
         extract_path = BASE_DIR / "update_temp_folder"
         try:
             with console.status(
                 "[bold green]Downloading full update package...", spinner="arrow3"
             ):
-                r = requests.get(GITHUB_ZIP_URL, stream=True, timeout=30)
-                if r.status_code != 200:
-                    raise Exception("Download failed")
-                with open(temp_zip, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
+                with urllib.request.urlopen(zip_url, timeout=30) as r, open(temp_zip, "wb") as f:
+                    shutil.copyfileobj(r, f)
 
             with console.status(
                 "[bold blue]Extracting and applying files...", spinner="dots"
@@ -105,9 +103,9 @@ class UpdateManager:
                         continue
                     dest_item = BASE_DIR / item.name
                     if item.is_dir():
-                        if dest_item.exists():
-                            shutil.rmtree(dest_item)
-                        shutil.copytree(item, dest_item)
+                        # Chép đè, không xóa trước: lỗi giữa chừng (file bị khóa...) vẫn
+                        # còn bản cũ chạy được thay vì mất cả thư mục
+                        shutil.copytree(item, dest_item, dirs_exist_ok=True)
                     else:
                         shutil.copy2(item, dest_item)
 

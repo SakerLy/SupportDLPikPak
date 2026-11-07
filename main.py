@@ -12,7 +12,6 @@ def install_requirements():
     required = {
         "aiohttp": "aiohttp",
         "aiofiles": "aiofiles",
-        "requests": "requests",
         "rich": "rich",
         "aiohttp_socks": "aiohttp-socks",
     }

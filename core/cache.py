@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 from datetime import datetime, timedelta
 from config.settings import BASE_DIR
 
@@ -12,6 +13,12 @@ class CacheManager:
     def init(cls):
         try:
             cls.CACHE_DIR.mkdir(exist_ok=True)
+            # File cache chỉ bị xóa khi đọc lại đúng khóa đó, nên dọn file cũ hơn 1 ngày
+            # (mọi mục cache đều hết hạn sau tối đa 1 giờ)
+            cutoff = time.time() - 86400
+            for f in cls.CACHE_DIR.glob("*.json"):
+                if f.stat().st_mtime < cutoff:
+                    f.unlink(missing_ok=True)
         except Exception:
             pass
 

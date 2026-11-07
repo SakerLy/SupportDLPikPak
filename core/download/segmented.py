@@ -51,6 +51,8 @@ def _make_connector() -> aiohttp.TCPConnector:
         resolver=resolver,
         limit=0,
         limit_per_host=0,
+        # shortcut: no cert check on the file CDN; this session carries no login or token
+        # headers, only signed file URLs. Remove if the CDN certs prove reliable.
         ssl=False,
         keepalive_timeout=60,
         ttl_dns_cache=300,
@@ -297,12 +299,12 @@ class SegmentedDownloadMixin:
         active_downloads = 0
         max_fail_streak = max(num_conn * 2, 10)
 
-        async def save_checkpoint():
+        async def save_checkpoint(ranges):
             async with ckpt_lock:
                 try:
                     ckpt_data = {
                         "total": file_size,
-                        "completed_ranges": self._merge_ranges(completed_ranges),
+                        "completed_ranges": self._merge_ranges(ranges),
                     }
                     async with aiofiles.open(ckpt_file, "w", encoding="utf-8") as f:
                         await f.write(json.dumps(ckpt_data))
@@ -317,14 +319,20 @@ class SegmentedDownloadMixin:
             with open(file_path, "r+b") as fd:
                 with mmap.mmap(fd.fileno(), file_size, access=mmap.ACCESS_WRITE) as mm:
 
+                    async def flush_and_checkpoint():
+                        # Checkpoint chỉ được ghi SAU KHI dữ liệu đã xuống đĩa; ghi trước thì
+                        # mất điện sẽ để lại đoạn "đã xong" toàn byte 0
+                        done_now = [r.copy() for r in completed_ranges]
+                        try:
+                            await asyncio.get_running_loop().run_in_executor(None, mm.flush)
+                        except Exception:
+                            return
+                        await save_checkpoint(done_now)
+
                     async def auto_flush():
-                        loop = asyncio.get_running_loop()
                         while not self.cancel_event.is_set():
                             await asyncio.sleep(4)
-                            try:
-                                await loop.run_in_executor(None, mm.flush)
-                            except Exception:
-                                pass
+                            await flush_and_checkpoint()
 
                     async def speed_monitor():
                         last_time = time.time()
@@ -521,7 +529,6 @@ class SegmentedDownloadMixin:
                                 cond.notify_all()
 
                             if ok:
-                                await save_checkpoint()
                                 speed = chunk_bytes / max(time_taken, 0.001)
                                 if speed > 5 * 1024 * 1024:
                                     current_chunk_size = min(
@@ -546,16 +553,12 @@ class SegmentedDownloadMixin:
                     finally:
                         flusher.cancel()
                         ui_monitor.cancel()
+                        await flush_and_checkpoint()
 
                     if shared["disk_full"]:
                         raise DiskFullError("No space left on device")
                     if self.cancel_event.is_set() or shared["aborted"]:
                         return False
-
-                    try:
-                        mm.flush()
-                    except Exception:
-                        pass
         except DiskFullError:
             raise
         except OSError as e:

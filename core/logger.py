@@ -40,7 +40,6 @@ DEFAULT_LOG_LEVEL = "INFO"
 # =========================================================================
 # ContextVars là công cụ hoàn hảo trong Asyncio để "nhớ" trạng thái của từng
 # luồng độc lập (không bị đụng chéo dữ liệu giữa các tiến trình tải).
-ctx_file = contextvars.ContextVar("ctx_file", default="")
 ctx_acc = contextvars.ContextVar("ctx_acc", default="")
 ctx_range = contextvars.ContextVar("ctx_range", default="")
 
@@ -49,15 +48,12 @@ class ContextFilter(logging.Filter):
     """Custom Filter tự động lấy các biến ngữ cảnh đính kèm vào mỗi record"""
 
     def filter(self, record):
-        f = ctx_file.get()
         a = ctx_acc.get()
         r = ctx_range.get()
 
         parts = []
         if a:
             parts.append(f"[Acc: {a}]")
-        if f:
-            parts.append(f"[File: {f}]")
         if r:
             parts.append(f"[Range: {r}]")
 

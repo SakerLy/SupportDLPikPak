@@ -150,7 +150,7 @@ async def test_proxy() -> list:
 
     timeout = aiohttp.ClientTimeout(total=15, sock_connect=10)
     async with aiohttp.ClientSession(
-        connector=make_connector(ssl=False), timeout=timeout
+        connector=make_connector(), timeout=timeout
     ) as s:
         for name, url in steps:
             t0 = time.perf_counter()

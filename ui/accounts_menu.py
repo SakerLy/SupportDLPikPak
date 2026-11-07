@@ -18,7 +18,6 @@ class AccountsMixin:
         Config.REFRESH_TOKEN = result["refresh_token"]
         Config.DEVICE_ID = result["device_id"]
         Config.MAIN_USER_ID = result.get("user_id") or ""
-        Config.CAPTCHA_TOKEN = ""
         Config.save_config()
         _run(reload_pool())
         console.print(f"\n  [bold green]{Language.get('login_success')}[/]")

@@ -28,7 +28,7 @@ class HttpClient:
             if cls._session and not cls._session.closed and cls._loop_id == loop_id:
                 asyncio.ensure_future(cls._session.close())
             cls._session = aiohttp.ClientSession(
-                connector=proxy_mod.make_connector(ssl=False, limit=64, ttl_dns_cache=300)
+                connector=proxy_mod.make_connector(limit=64, ttl_dns_cache=300)
             )
             cls._loop_id = loop_id
             cls._proxy_sig = proxy_sig

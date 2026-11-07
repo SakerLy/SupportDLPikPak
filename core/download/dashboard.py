@@ -9,6 +9,9 @@ from config.settings import Language
 DONE_STATUS = "Done"
 SKIP_STATUS = "Skipped"
 GOOD_STATUSES = {DONE_STATUS, SKIP_STATUS}
+# Trạng thái kết thúc lỗi (so bằng startswith vì có dạng "Err 403")
+FAIL_STATUSES = ("Failed", "Restore Fail", "No Link", "No URL", "Auth Fail",
+                 "Err ", "Error", "Disk Full", "Disk Error")
 
 
 class DashboardMixin:
@@ -17,6 +20,7 @@ class DashboardMixin:
         done_count = sum(1 for p in all_threads if p["status"] == DONE_STATUS)
         skipped_count = sum(1 for p in all_threads if p["status"] == SKIP_STATUS)
         cancelled_count = sum(1 for p in all_threads if p["status"] == "Cancelled")
+        failed_count = sum(1 for p in all_threads if p["status"].startswith(FAIL_STATUSES))
 
         display_list = [
             p
@@ -46,7 +50,7 @@ class DashboardMixin:
         stats_grid.add_column(justify="center", ratio=1)
         stats_grid.add_column(justify="center", ratio=1)
         stats_grid.add_row(
-            f"[bold cyan]Queue: {self.total_files_count - done_count - skipped_count - cancelled_count}[/]",
+            f"[bold cyan]Queue: {self.total_files_count - done_count - skipped_count - cancelled_count - failed_count}[/]",
             f"[bold green]Done: {done_count}[/] | [bold yellow]Skip: {skipped_count}[/]"
             + (f" | [bold red]Cancel: {cancelled_count}[/]" if cancelled_count else ""),
             f"[bold white]Speed: {self.format_size(total_speed)}/s | ETA: {eta_str}[/]",
@@ -69,14 +73,9 @@ class DashboardMixin:
 
         for p in sorted(display_list, key=lambda x: x["id"]):
             pct = min(p.get("percent", 0), 100)
-            bad = p["status"] in (
-                "Error",
-                "Failed",
-                "Restore Fail",
+            bad = p["status"].startswith(FAIL_STATUSES) or p["status"] in (
                 "Cancelled",
                 "Cancelling...",
-                "Disk Error",
-                "Disk Full",
             )
             color = "red" if bad else ("green" if pct == 100 else "cyan")
             filled = int(20 * pct / 100)

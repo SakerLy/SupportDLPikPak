@@ -92,3 +92,79 @@ def test_cloud_ledger_roundtrip(tmp_path, monkeypatch):
     assert not cloud_ledger.contains("dev1", "f1")
     cloud_ledger.remove("dev1", ["f2"])
     assert cloud_ledger.get("dev1") == []
+
+
+def test_concurrent_ensure_token_refreshes_once():
+    import asyncio
+    from core.pikpak.api import PikPakAPI
+
+    api = PikPakAPI(refresh_token="rt", device_id="d")
+    calls = []
+
+    async def fake_refresh():
+        calls.append(1)
+        await asyncio.sleep(0.01)
+        api.access_token, api._token_time = "at", __import__("time").time()
+        return True
+
+    api.refresh_token = fake_refresh
+
+    async def main():
+        return await asyncio.gather(*(api.ensure_token() for _ in range(5)))
+
+    assert asyncio.run(main()) == [True] * 5
+    assert len(calls) == 1
+
+
+def test_failed_listing_page_raises_and_is_not_cached(monkeypatch):
+    import asyncio
+    from core.cache import CacheManager
+    from core.net.http_client import HttpClient
+    from core.pikpak.api import PikPakAPI
+
+    pages = iter([(200, {"files": [{"id": "1"}], "next_page_token": "p2"}, ""), (0, None, "timeout")])
+
+    async def fake_request(*a, **k):
+        return next(pages)
+
+    monkeypatch.setattr(HttpClient, "request", staticmethod(fake_request))
+    monkeypatch.setattr(Config, "USE_CACHE", True)
+    stored = []
+    monkeypatch.setattr(CacheManager, "get", classmethod(lambda cls, *a: None))
+    monkeypatch.setattr(CacheManager, "set", classmethod(lambda cls, *a, **k: stored.append(a)))
+    with pytest.raises(RuntimeError):
+        asyncio.run(PikPakAPI(refresh_token="rt").get_folder_files("s", "parent", "t"))
+    assert stored == []
+
+
+def test_restore_error_never_claims_users_own_cloud_file():
+    import asyncio
+
+    class FakeAPI:
+        tracked, deleted = [], []
+
+        async def ensure_token(self):
+            return True
+
+        async def wait_for_file(self, name, max_retries=1, expected_size=None):
+            return "user_file"  # file của người dùng, trùng tên và dung lượng
+
+        def is_temp_file(self, fid):
+            return False
+
+        async def restore_and_poll(self, *a):
+            return None, "some_error"
+
+        def track_temp_file(self, fid):
+            self.tracked.append(fid)
+
+        async def delete_file(self, fid):
+            self.deleted.append(fid)
+
+    api = FakeAPI()
+    fid, used, owned = asyncio.run(
+        Downloader()._restore_with_failover([api], "a.mp4", 10, "s", "src", "t")
+    )
+    # Dùng được file đó để tải, nhưng không được ghi sổ (sẽ bị xóa) hay xóa nó
+    assert (fid, used, owned) == ("user_file", api, False)
+    assert api.tracked == [] and api.deleted == []

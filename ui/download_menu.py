@@ -11,6 +11,7 @@ from rich.prompt import Prompt, Confirm
 from rich import box
 from config.settings import Config, console, Language
 from core.download.dashboard import GOOD_STATUSES
+from core.download.paths import safe_name, safe_rel_dir
 from core.pikpak.account_pool import get_pool, reload_pool
 from core.logger import logger
 from ui.common import _run, _read_key_nonblocking
@@ -129,10 +130,24 @@ class DownloadMixin:
         if not master_files:
             return
         download_items = []
+        seen_files, seen_paths = set(), set()
+
+        def _local_key(f):
+            # Đường dẫn sau khi làm sạch tên, không phân biệt hoa thường (giống ổ đĩa Windows)
+            return (safe_rel_dir(f["path"]) / safe_name(f["name"])).as_posix().lower()
+
         for f in master_files:
             tree_data = all_link_data[f["_link_idx"]]["tree"]
             f["_share_id"] = tree_data["share_id"]
             f["_pass_token"] = tree_data["pass_token"]
+            # Cùng một link dán 2 lần (vd. có/không ?pwd=): bỏ file trùng
+            if (f["_share_id"], f["id"]) in seen_files:
+                continue
+            seen_files.add((f["_share_id"], f["id"]))
+            # Hai link có file trùng đường dẫn: tách vào thư mục riêng để không ghi đè nhau
+            if _local_key(f) in seen_paths:
+                f["path"] = f"{f['_share_id']}/{f['path']}"
+            seen_paths.add(_local_key(f))
             download_items.append(f)
         _run(reload_pool())
         link_count = len({f["_link_idx"] for f in download_items})

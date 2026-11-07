@@ -144,6 +144,7 @@ class PikPakAPI:
         self.last_error = ""
         # True khi PikPak đã thu hồi refresh token: chỉ đăng nhập lại mới sửa được
         self.needs_relogin = False
+        self._refresh_task = None
 
     def _sync_main_credentials(self):
         Config.load_config()
@@ -170,7 +171,15 @@ class PikPakAPI:
         )
 
     async def ensure_token(self) -> bool:
-        return True if self.token_valid() else await self.refresh_token()
+        if self.token_valid():
+            return True
+        # Nhiều file cùng hết hạn token một lúc: chỉ gửi MỘT lần refresh, các file khác
+        # chờ kết quả đó. Refresh song song bằng cùng refresh token sẽ bị PikPak từ chối.
+        # Dùng task (không dùng Lock) vì mỗi _run() là một event loop mới.
+        task = self._refresh_task
+        if task is None or task.done():
+            task = self._refresh_task = asyncio.ensure_future(self.refresh_token())
+        return await asyncio.shield(task)
 
     async def refresh_token(self) -> bool:
         if self._is_main:
@@ -260,6 +269,9 @@ class PikPakAPI:
                     params=params,
                 )
                 if not data or "files" not in data:
+                    if next_token:
+                        # Trang sau bị lỗi: không trả (và không cache) danh sách thiếu
+                        raise RuntimeError(f"share listing page failed: HTTP {code}")
                     break
                 all_files.extend(data.get("files", []))
                 next_token = data.get("next_page_token")
@@ -298,8 +310,9 @@ class PikPakAPI:
                 headers=self.headers,
                 params=params,
             )
-            if not data:
-                break
+            if code != 200 or not isinstance(data, dict):
+                # Không trả (và không cache) danh sách thư mục thiếu file
+                raise RuntimeError(f"folder listing failed: HTTP {code}")
             all_files.extend(data.get("files", []))
             next_token = data.get("next_page_token")
             if not next_token:
