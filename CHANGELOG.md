@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.1.1 — 2026-11-07
+
+### Bảo mật
+
+- **Bật lại kiểm tra chứng chỉ HTTPS khi đăng nhập và gọi API PikPak.** Trước đây tool không kiểm tra, nên một proxy hoặc mạng Wi-Fi công cộng xấu có thể đọc được mật khẩu và token của bạn.
+
+### Sửa lỗi
+
+- **Tải nhiều link có file trùng tên** (vd. hai link cùng có `01.mp4`) không còn ghi đè hoặc làm hỏng nhau: file thứ hai được đặt vào thư mục riêng. Dán cùng một link hai lần cũng không tải trùng nữa.
+- **Lượt tải dài hơn 20 phút** không còn bị lỗi "Auth Fail" hay bắt đăng nhập lại do nhiều file cùng làm mới token một lúc.
+- **Thư mục nhiều file** bị lỗi mạng khi đang đọc danh sách giờ báo lỗi, thay vì âm thầm bỏ sót file (và nhớ danh sách thiếu đó 30 phút).
+- **Không còn xóa file đã có trên máy** khi tải lỗi hoặc bấm `Q` hủy; file cũ chỉ bị thay khi bản mới tải xong.
+- **Mất điện giữa lúc tải** không còn để lại file hỏng bị coi là đã xong khi tải tiếp.
+- Bảng tiến trình: các lỗi "No Link", "Auth Fail", "Err 403"... hiện màu đỏ; ô Queue không đếm file lỗi.
+
+### Cải tiến
+
+- **Tự cập nhật tải đúng bản release** thay vì bản đang phát triển, và không làm hỏng thư mục tool nếu cập nhật lỗi giữa chừng.
+- Bỏ thư viện `requests` (không cần cài nữa).
+- Tự dọn file cache cũ hơn 1 ngày khi mở tool.
+
 ## v0.1.0 — 2026-10-16
 
 ### Sửa lỗi
